@@ -14,6 +14,8 @@ import { StatusBar } from 'expo-status-bar';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import { useRouter } from 'expo-router';
 import { useTheme } from '../../context/ThemeContext';
+import { useAuth } from '../../context/AuthContext';
+import { supabase } from '../../lib/supabase';
 import { 
   X, 
   Zap, 
@@ -21,10 +23,12 @@ import {
   RotateCcw, 
   Check,
   Image as ImageIcon,
-  Camera
+  Camera,
+  Plus
 } from 'lucide-react-native';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Haptics from 'expo-haptics';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -32,10 +36,12 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 export default function CameraScreen() {
   const router = useRouter();
   const { theme, isDark } = useTheme();
+  const { session } = useAuth();
   const [permission, requestPermission] = useCameraPermissions();
   const [facing, setFacing] = useState<CameraType>('back');
   const [flash, setFlash] = useState<'off' | 'on'>('off');
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
   const cameraRef = useRef<CameraView>(null);
 
   useEffect(() => {
@@ -96,7 +102,7 @@ export default function CameraScreen() {
           marginBottom: s(32),
           lineHeight: s(24),
         }}>
-          We need access to your camera so you can take photos and videos to share with your friends
+          We need access to your camera so you can take photos to share as stories
         </Text>
         <TouchableOpacity 
           style={{
@@ -134,8 +140,8 @@ export default function CameraScreen() {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       allowsEditing: true,
-      aspect: [4, 3],
-      quality: 1,
+      aspect: [9, 16],
+      quality: 0.9,
     });
 
     if (!result.canceled) {
@@ -147,21 +153,20 @@ export default function CameraScreen() {
     if (!cameraRef.current) return;
 
     try {
-      // Trigger haptic feedback
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
       const photo = await cameraRef.current.takePictureAsync({
         quality: 1,
         base64: false,
         skipProcessing: Platform.OS === 'android',
+        shutterSound: false,
       });
 
       if (photo) {
-        // Compress the image
         const manipulatedImage = await ImageManipulator.manipulateAsync(
           photo.uri,
           [{ resize: { width: 1080 } }],
-          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
+          { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG }
         );
         
         setCapturedImage(manipulatedImage.uri);
@@ -176,9 +181,61 @@ export default function CameraScreen() {
     setCapturedImage(null);
   };
 
-  const savePicture = () => {
-    Alert.alert('Success', 'Photo saved!');
-    setCapturedImage(null);
+  const uploadStory = async () => {
+    if (!capturedImage || !session?.user) return;
+
+    setUploading(true);
+    try {
+      // Upload new image
+      const fileExt = 'jpg';
+      const fileName = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}.${fileExt}`;
+      const filePath = `${session.user.id}/${fileName}`;
+
+      // Read file directly using expo-file-system (handles file:// URIs properly)
+      const base64 = await FileSystem.readAsStringAsync(capturedImage, {
+        encoding: 'base64',
+      });
+
+      // Convert base64 to Uint8Array for React Native compatibility
+      const binaryString = atob(base64);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      const { error: uploadError } = await supabase.storage
+        .from('stories')
+        .upload(filePath, bytes, {
+          contentType: 'image/jpeg',
+          cacheControl: '3600',
+        });
+
+      if (uploadError) throw new Error(uploadError.message);
+
+      const { data: { publicUrl } } = supabase.storage
+        .from('stories')
+        .getPublicUrl(filePath);
+
+      // Create story record
+      const expiresAt = new Date();
+      expiresAt.setHours(expiresAt.getHours() + 24);
+
+      const { error: insertError } = await supabase.from('stories').insert({
+        user_id: session.user.id,
+        image_url: publicUrl,
+        expires_at: expiresAt.toISOString(),
+      });
+
+      if (insertError) throw new Error(insertError.message);
+
+      Alert.alert('Success', 'Story uploaded!');
+      router.back();
+    } catch (err: any) {
+      console.error('Error uploading story:', err);
+      Alert.alert('Error', err?.message || 'Failed to upload story. Please try again.');
+    } finally {
+      setUploading(false);
+    }
   };
 
   const closeCamera = () => {
@@ -198,26 +255,40 @@ export default function CameraScreen() {
 
         <View style={styles.previewFooter}>
           <TouchableOpacity 
-            style={[styles.actionButton, { backgroundColor: '#fff' }]}
+            style={[styles.actionButton, { backgroundColor: 'rgba(0,0,0,0.5)' }]}
             onPress={retakePicture}
           >
-            <RotateCcw size={24} color="#000" />
+            <RotateCcw size={24} color="#fff" />
           </TouchableOpacity>
           
           <TouchableOpacity 
             style={[styles.saveButton, { backgroundColor: theme.primary }]}
-            onPress={savePicture}
+            onPress={uploadStory}
+            disabled={uploading}
           >
-            <Check size={32} color="#fff" />
+            {uploading ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Plus size={32} color="#fff" />
+            )}
           </TouchableOpacity>
           
-          <TouchableOpacity 
-            style={[styles.actionButton, { backgroundColor: '#fff' }]}
-            onPress={() => Alert.alert('Send', 'Send to chat?')}
-          >
-            <ImageIcon size={24} color="#000" />
-          </TouchableOpacity>
+          <View style={{ width: 50 }} />
         </View>
+
+        <Text style={{
+          position: 'absolute',
+          bottom: 130,
+          alignSelf: 'center',
+          color: '#fff',
+          fontSize: 16,
+          fontWeight: '600',
+          textShadowColor: 'rgba(0,0,0,0.5)',
+          textShadowOffset: { width: 0, height: 1 },
+          textShadowRadius: 3,
+        }}>
+          Add to Story
+        </Text>
       </View>
     );
   }
@@ -382,7 +453,7 @@ const styles = StyleSheet.create({
   },
   previewImage: {
     flex: 1,
-    resizeMode: 'cover',
+    resizeMode: 'contain',
   },
   previewHeader: {
     position: 'absolute',

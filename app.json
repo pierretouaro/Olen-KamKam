@@ -60,7 +60,8 @@
         {
           "photosPermission": "Allow Olen to access your photos to share them in chats."
         }
-      ]
+      ],
+      "expo-sqlite"
     ],
     "experiments": {
       "typedRoutes": true,

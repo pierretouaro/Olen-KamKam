@@ -1,5 +1,6 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
+import { messageDb } from '../lib/messageDatabase';
 
 export interface Message {
   id: string;
@@ -18,27 +19,100 @@ export interface Message {
     full_name: string;
     avatar_url: string;
   };
+  synced?: boolean;
 }
 
-export const useRealtimeMessages = (conversationId: string | null) => {
+const MESSAGES_PER_PAGE = 50;
+
+export const useRealtimeMessages = (conversationId: string | null, userId?: string) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const [pendingMessages, setPendingMessages] = useState<Message[]>([]);
+  
+  // Use refs to track state in callbacks without dependencies
+  const messagesRef = useRef<Message[]>([]);
+  const hasMoreRef = useRef(true);
+  const loadingMoreRef = useRef(false);
+  
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+  
+  useEffect(() => {
+    hasMoreRef.current = hasMore;
+  }, [hasMore]);
 
-  // Fetch initial messages using stored procedure
-  const fetchMessages = useCallback(async () => {
+  // Load initial messages from local DB first (instant)
+  const loadLocalMessages = useCallback(async () => {
+    if (!conversationId) return;
+    
+    try {
+      const localMsgs = await messageDb.getMessages(conversationId, MESSAGES_PER_PAGE);
+      
+      if (localMsgs.length > 0) {
+        const transformed = localMsgs.map(dbMsg => ({
+          id: dbMsg.id,
+          conversation_id: dbMsg.conversation_id,
+          sender_id: dbMsg.sender_id,
+          content: dbMsg.content,
+          type: dbMsg.type,
+          metadata: JSON.parse(dbMsg.metadata || '{}'),
+          reply_to: dbMsg.reply_to,
+          edited_at: dbMsg.edited_at,
+          deleted_at: dbMsg.deleted_at,
+          created_at: dbMsg.created_at,
+          read_by: JSON.parse(dbMsg.read_by || '[]'),
+          sender: {
+            username: dbMsg.sender_username,
+            full_name: dbMsg.sender_full_name,
+            avatar_url: dbMsg.sender_avatar,
+          },
+          synced: dbMsg.synced === 1,
+        }));
+        
+        setMessages(transformed.reverse()); // Reverse to get oldest first
+        setLoading(false); // Show local data immediately
+      }
+    } catch (error) {
+      console.error('Error loading local messages:', error);
+    }
+  }, [conversationId]);
+
+  // Fetch messages from server with pagination
+  const fetchMessages = useCallback(async (isInitial: boolean = true) => {
     if (!conversationId) {
       setLoading(false);
       return;
     }
     
+    if (isInitial) {
+      setLoading(true);
+      // First load from local DB for instant UI
+      await loadLocalMessages();
+    } else {
+      if (loadingMoreRef.current || !hasMoreRef.current) return;
+      setLoadingMore(true);
+      loadingMoreRef.current = true;
+    }
+    
     try {
-      const { data, error } = await supabase.rpc('get_conversation_messages', {
-        p_conversation_id: conversationId
+      const oldestMessage = isInitial ? null : messagesRef.current[0];
+      const beforeDate = oldestMessage?.created_at || new Date().toISOString();
+      
+      // Use RPC for paginated fetch
+      const { data, error } = await supabase.rpc('get_conversation_messages_paginated', {
+        p_conversation_id: conversationId,
+        p_limit: MESSAGES_PER_PAGE,
+        p_before: beforeDate,
       });
 
       if (error) {
         console.error('Error fetching messages:', error);
         setLoading(false);
+        setLoadingMore(false);
+        loadingMoreRef.current = false;
         return;
       }
 
@@ -60,26 +134,82 @@ export const useRealtimeMessages = (conversationId: string | null) => {
           full_name: msg.sender_full_name,
           avatar_url: msg.sender_avatar,
         },
+        synced: true,
       }));
 
-      setMessages(transformed);
+      // Save to local DB for next time
+      if (transformed.length > 0) {
+        await messageDb.saveMessages(transformed, conversationId);
+      }
+
+      // Update state
+      if (isInitial) {
+        setMessages(transformed.reverse());
+        setHasMore(transformed.length === MESSAGES_PER_PAGE);
+      } else {
+        // Prepend older messages
+        setMessages(prev => [...transformed.reverse(), ...prev]);
+        setHasMore(transformed.length === MESSAGES_PER_PAGE);
+      }
+      
     } catch (error) {
       console.error('Error fetching messages:', error);
     } finally {
       setLoading(false);
+      setLoadingMore(false);
+      loadingMoreRef.current = false;
     }
-  }, [conversationId]);
+  }, [conversationId, loadLocalMessages]);
 
-  // Send message using stored procedure
+  // Load more messages (pagination)
+  const loadMore = useCallback(() => {
+    if (!loadingMoreRef.current && hasMoreRef.current) {
+      fetchMessages(false);
+    }
+  }, [fetchMessages]);
+
+  // Optimistic send message
   const sendMessage = useCallback(async (
     content: string, 
     type: string = 'text', 
     metadata: any = {}, 
     replyTo?: string
   ) => {
-    if (!conversationId) return;
+    if (!conversationId || !userId) return;
+
+    const tempId = `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const now = new Date().toISOString();
+    
+    // Create optimistic message
+    const optimisticMessage: Message = {
+      id: tempId,
+      conversation_id: conversationId,
+      sender_id: userId,
+      content,
+      type,
+      metadata,
+      reply_to: replyTo || null,
+      edited_at: null,
+      deleted_at: null,
+      created_at: now,
+      read_by: [userId],
+      sender: {
+        username: '',
+        full_name: 'You',
+        avatar_url: '',
+      },
+      synced: false,
+    };
+
+    // Add to pending and show immediately
+    setPendingMessages(prev => [...prev, optimisticMessage]);
+    setMessages(prev => [...prev, optimisticMessage]);
+
+    // Save to local DB as pending
+    await messageDb.savePendingMessage(optimisticMessage);
 
     try {
+      // Send to server
       const { data, error } = await supabase.rpc('send_message', {
         p_conversation_id: conversationId,
         p_content: content,
@@ -90,7 +220,23 @@ export const useRealtimeMessages = (conversationId: string | null) => {
 
       if (error) {
         console.error('Error sending message:', error);
+        // Keep the pending message but mark as failed
         return null;
+      }
+
+      // Update local DB with real ID
+      if (data && data.id) {
+        await messageDb.updateMessageId(tempId, data.id);
+        
+        // Update UI with real message
+        setMessages(prev => 
+          prev.map(msg => 
+            msg.id === tempId 
+              ? { ...msg, id: data.id, synced: true }
+              : msg
+          )
+        );
+        setPendingMessages(prev => prev.filter(m => m.id !== tempId));
       }
 
       return data;
@@ -98,9 +244,9 @@ export const useRealtimeMessages = (conversationId: string | null) => {
       console.error('Error sending message:', err);
       return null;
     }
-  }, [conversationId]);
+  }, [conversationId, userId]);
 
-  // Edit message - uses direct table access but should work now
+  // Edit message
   const editMessage = useCallback(async (messageId: string, newContent: string) => {
     const { error } = await supabase
       .from('messages')
@@ -117,6 +263,10 @@ export const useRealtimeMessages = (conversationId: string | null) => {
 
   // Delete message (soft delete)
   const deleteMessage = useCallback(async (messageId: string) => {
+    // Optimistic delete
+    setMessages(prev => prev.filter(m => m.id !== messageId));
+    await messageDb.deleteMessage(messageId);
+
     const { error } = await supabase
       .from('messages')
       .update({ deleted_at: new Date().toISOString() })
@@ -151,9 +301,17 @@ export const useRealtimeMessages = (conversationId: string | null) => {
   }, []);
 
   useEffect(() => {
-    if (!conversationId) return;
+    if (!conversationId) {
+      setMessages([]);
+      setHasMore(true);
+      setLoading(false);
+      return;
+    }
 
-    fetchMessages();
+    // Initialize DB and load messages
+    messageDb.init().then(() => {
+      fetchMessages(true);
+    });
 
     // Subscribe to new messages
     const subscription = supabase
@@ -166,8 +324,43 @@ export const useRealtimeMessages = (conversationId: string | null) => {
           table: 'messages',
           filter: `conversation_id=eq.${conversationId}`,
         },
-        () => {
-          fetchMessages(); // Refetch when changes occur
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            const newMsg = payload.new as any;
+            // Don't add if it's our own optimistic message
+            if (!newMsg.id.startsWith('temp_')) {
+              const transformed: Message = {
+                id: newMsg.id,
+                conversation_id: newMsg.conversation_id,
+                sender_id: newMsg.sender_id,
+                content: newMsg.content,
+                type: newMsg.type,
+                metadata: newMsg.metadata,
+                reply_to: newMsg.reply_to,
+                edited_at: newMsg.edited_at,
+                deleted_at: newMsg.deleted_at,
+                created_at: newMsg.created_at,
+                read_by: newMsg.read_by || [],
+                synced: true,
+              };
+              
+              // Add to local DB and state
+              messageDb.saveMessages([transformed], conversationId);
+              setMessages(prev => {
+                if (prev.find(m => m.id === transformed.id)) return prev;
+                return [...prev, transformed];
+              });
+            }
+          } else if (payload.eventType === 'UPDATE') {
+            const updatedMsg = payload.new as any;
+            setMessages(prev => 
+              prev.map(msg => 
+                msg.id === updatedMsg.id 
+                  ? { ...msg, ...updatedMsg, synced: true }
+                  : msg
+              )
+            );
+          }
         }
       )
       .subscribe();
@@ -180,10 +373,14 @@ export const useRealtimeMessages = (conversationId: string | null) => {
   return {
     messages,
     loading,
+    loadingMore,
+    hasMore,
+    pendingMessages,
     sendMessage,
     editMessage,
     deleteMessage,
     updateReactions,
-    refresh: fetchMessages,
+    loadMore,
+    refresh: () => fetchMessages(true),
   };
 };

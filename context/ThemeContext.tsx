@@ -42,8 +42,8 @@ const periwinkleLight: Theme = {
 
 const periwinkleDark: Theme = {
   background: '#0D0D14',
-  surface: 'rgba(26, 26, 46, 0.85)',
-  surfaceHighlight: 'rgba(37, 37, 66, 0.9)',
+  surface: '#1A1A2E',
+  surfaceHighlight: '#252542',
   primary: '#8B9EFF',
   primaryLight: 'rgba(139, 158, 255, 0.2)',
   text: '#F8FAFC',
@@ -51,7 +51,7 @@ const periwinkleDark: Theme = {
   textMuted: '#64748B',
   border: 'rgba(255, 255, 255, 0.1)',
   incomingBubble: '#2B2B45',
-  outgoingBubble: '#8B5CF6',
+  outgoingBubble: '#8B9EFF',
   fontFamily: Platform.OS === 'ios' ? 'System' : 'sans-serif',
   fontFamilyMedium: Platform.OS === 'ios' ? 'System' : 'sans-serif-medium',
   fontFamilyBold: Platform.OS === 'ios' ? 'System' : 'sans-serif',
@@ -63,7 +63,7 @@ const greenLight: Theme = {
   surface: '#F0F5F2',
   surfaceHighlight: '#E8F0EC',
   primary: '#1B4D3E',
-  primaryLight: 'rgba(27, 77, 62, 0.15)',
+  primaryLight: 'rgba(45, 138, 111, 0.25)',
   text: '#1E1B2E',
   textSecondary: '#4B5563',
   textMuted: '#6B7280',

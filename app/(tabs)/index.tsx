@@ -10,12 +10,13 @@ import {
   Platform,
   Image, // Added Image import
 } from 'react-native';
-import NotesBar from '../../components/NotesBar';
+import StoriesBar from '../../components/StoriesBar';
 import { StatusBar } from 'expo-status-bar';
 import { useRouter, useFocusEffect } from 'expo-router';
 import Animated, { FadeIn, FadeInUp } from 'react-native-reanimated';
 import { BlurView } from 'expo-blur';
 import { useTheme } from '../../context/ThemeContext';
+import { useSectionFilter } from '../../context/SectionFilterContext';
 import { 
   Search, 
   Plus, 
@@ -52,11 +53,13 @@ export default function MessagesScreen() {
   const router = useRouter();
   const { theme, isDark, scale } = useTheme();
   const { user } = useAuth();
+  const { sectionFilterEnabled } = useSectionFilter();
   const [conversations, setConversations] = useState<ProcessedConversation[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [unseenActivityCount, setUnseenActivityCount] = useState(0);
+  const [activeFilter, setActiveFilter] = useState<'all' | 'contacts' | 'groups' | 'unread'>('all');
 
   const s = (size: number) => size * scale;
 
@@ -94,22 +97,34 @@ export default function MessagesScreen() {
         }
       };
 
+      // Helper to detect haptic messages in conversation preview
+      const getLastMessagePreview = (content: string | null, type: string | null) => {
+        if (type === 'voice') return 'Voice message';
+        if (type === 'haptic' || (content && content.includes('"type":"haptic"'))) return 'Sent a vibe';
+        if (!content) return 'No messages yet';
+        return content;
+      };
+
       const processedConversations: ProcessedConversation[] = (data || []).map((item: any) => ({
         id: item.conversation_id,
-        name: item.other_user_name || item.other_user_username || 'Unknown',
-        message: item.last_message_content || 'No messages yet',
+        name: item.is_group 
+          ? (item.group_name || 'Group Chat')
+          : (item.other_user_name || item.other_user_username || 'Unknown'),
+        message: getLastMessagePreview(item.last_message_content, item.last_message_type),
         time: item.last_message_time 
           ? formatMessageTime(item.last_message_time)
           : '',
         unread: parseInt(item.unread_count) || 0,
         sent: false,
         read: parseInt(item.unread_count) === 0,
-        avatar: (item.other_user_name || item.other_user_username || '?')[0].toUpperCase(),
-        avatarUrl: item.other_user_avatar, // Map the avatar URL from RPC
-        isGroup: item.conversation_type === 'group',
+        avatar: item.is_group
+          ? (item.group_name?.[0] || 'G').toUpperCase()
+          : (item.other_user_name || item.other_user_username || '?')[0].toUpperCase(),
+        avatarUrl: item.is_group ? item.group_avatar : item.other_user_avatar,
+        isGroup: item.is_group,
         color: '#6366F1',
         otherUserId: item.other_user_id,
-        isOnline: item.is_online || false,
+        isOnline: !item.is_group && (item.is_online || false),
       }));
 
       setConversations(processedConversations);
@@ -180,10 +195,46 @@ export default function MessagesScreen() {
     fetchConversations();
   };
 
-  const filteredChats = conversations.filter(chat =>
+  // Deduplicate conversations by ID
+  const uniqueConversations = conversations.filter((chat, index, self) =>
+    index === self.findIndex((c) => c.id === chat.id)
+  );
+
+  // Filter conversations based on active filter
+  const filteredByType = uniqueConversations.filter(chat => {
+    switch (activeFilter) {
+      case 'contacts':
+        return !chat.isGroup;
+      case 'groups':
+        return chat.isGroup;
+      case 'unread':
+        return chat.unread > 0;
+      default:
+        return true;
+    }
+  });
+
+  let filteredChats = filteredByType.filter(chat =>
     chat.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     chat.message.toLowerCase().includes(searchQuery.toLowerCase())
   );
+
+  // Sort: group chats first when in "All" filter
+  if (activeFilter === 'all') {
+    filteredChats = filteredChats.sort((a, b) => {
+      if (a.isGroup && !b.isGroup) return -1;
+      if (!a.isGroup && b.isGroup) return 1;
+      return 0;
+    });
+  }
+
+  // Filter counts - shows unread chats for each section
+  const filterCounts = {
+    all: uniqueConversations.filter(c => c.unread > 0).length,
+    contacts: uniqueConversations.filter(c => !c.isGroup && c.unread > 0).length,
+    groups: uniqueConversations.filter(c => c.isGroup && c.unread > 0).length,
+    unread: uniqueConversations.filter(c => c.unread > 0).length,
+  };
 
   const renderConversation = ({ item, index }: { item: ProcessedConversation; index: number }) => (
     <Animated.View
@@ -222,6 +273,15 @@ export default function MessagesScreen() {
               style={{ width: '100%', height: '100%' }}
               resizeMode="cover"
             />
+          ) : item.isGroup ? (
+            <View style={{
+              width: '100%',
+              height: '100%',
+              justifyContent: 'center',
+              alignItems: 'center',
+            }}>
+              <Users size={s(28)} color="#fff" />
+            </View>
           ) : (
             <View style={{
               width: '100%',
@@ -463,10 +523,88 @@ export default function MessagesScreen() {
             )}
           </View>
         </View>
+
+        {/* Filter Bar - Tab bar style */}
+        {sectionFilterEnabled && (
+          <View style={{
+            marginTop: s(16),
+          }}>
+            <View style={{
+              flexDirection: 'row',
+              backgroundColor: theme.surface,
+              borderRadius: s(26),
+              padding: s(5),
+              borderWidth: 0.5,
+              borderColor: isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.08)',
+            }}>
+              {[
+                { key: 'all', label: 'All' },
+                { key: 'contacts', label: 'Contacts' },
+                { key: 'groups', label: 'Groups' },
+                { key: 'unread', label: 'Unread' },
+              ].map((filter) => {
+                const isActive = activeFilter === filter.key;
+                const count = filterCounts[filter.key as keyof typeof filterCounts];
+                return (
+                  <TouchableOpacity
+                    key={filter.key}
+                    onPress={() => setActiveFilter(filter.key as typeof activeFilter)}
+                    style={{
+                      flex: 1,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      paddingVertical: s(11),
+                      paddingHorizontal: s(8),
+                      borderRadius: s(21),
+                      backgroundColor: isActive ? theme.surface : 'transparent',
+                      borderWidth: isActive ? 0.5 : 0,
+                      borderColor: isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.08)',
+                      shadowColor: isActive ? '#000' : 'transparent',
+                      shadowOffset: { width: 0, height: 1 },
+                      shadowOpacity: isActive ? 0.08 : 0,
+                      shadowRadius: 2,
+                      elevation: isActive ? 1 : 0,
+                    }}
+                  >
+                    <Text style={{
+                      color: isActive ? theme.text : theme.textMuted,
+                      fontSize: s(13),
+                      fontWeight: isActive ? '700' : '600',
+                      fontFamily: isActive ? theme.fontFamilyBold : theme.fontFamilyMedium,
+                    }}>
+                      {filter.label}
+                    </Text>
+                    {count > 0 && (
+                      <View style={{
+                        backgroundColor: theme.primary,
+                        minWidth: s(18),
+                        height: s(18),
+                        borderRadius: s(9),
+                        paddingHorizontal: s(5),
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        marginLeft: s(6),
+                      }}>
+                        <Text style={{
+                          color: '#fff',
+                          fontSize: s(11),
+                          fontWeight: '700',
+                        }}>
+                          {count > 99 ? '99+' : count}
+                        </Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        )}
       </View>
 
-      {/* Notes Bar */}
-      <NotesBar />
+      {/* Stories Bar */}
+      <StoriesBar />
 
       {/* Conversations List */}
       {filteredChats.length > 0 ? (

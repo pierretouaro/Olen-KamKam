@@ -21,7 +21,7 @@ interface Activity {
   actor_name: string;
   actor_username: string;
   actor_avatar: string | null;
-  activity_type: 'bio_added' | 'bio_changed' | 'username_changed' | 'full_name_changed' | 'note_added' | 'joined_olen';
+  activity_type: 'bio_added' | 'bio_changed' | 'username_changed' | 'full_name_changed' | 'story_added' | 'joined_olen';
   old_value: string | null;
   new_value: string | null;
   created_at: string;
@@ -105,7 +105,7 @@ export default function ActivityScreen() {
         return <AtSign size={s(20)} color={theme.primary} />;
       case 'full_name_changed':
         return <Edit3 size={s(20)} color={theme.primary} />;
-      case 'note_added':
+      case 'story_added':
         return <Sparkles size={s(20)} color={theme.primary} />;
       case 'joined_olen':
         return <User size={s(20)} color={theme.primary} />;
@@ -126,8 +126,8 @@ export default function ActivityScreen() {
         return `${name} changed their username`;
       case 'full_name_changed':
         return `${name} changed their name`;
-      case 'note_added':
-        return `${name} added a note`;
+      case 'story_added':
+        return `${name} added a story`;
       case 'joined_olen':
         return `${name} joined Olen`;
       default:
@@ -144,7 +144,7 @@ export default function ActivityScreen() {
         return activity.new_value ? `@${activity.new_value}` : null;
       case 'full_name_changed':
         return activity.new_value;
-      case 'note_added':
+      case 'story_added':
         return activity.new_value;
       default:
         return null;

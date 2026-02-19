@@ -113,26 +113,26 @@ CREATE TRIGGER on_profile_update
     FOR EACH ROW
     EXECUTE FUNCTION public.create_profile_activity();
 
--- Function to create activity when note is added
-CREATE OR REPLACE FUNCTION public.create_note_activity()
+-- Function to create activity when story is added
+CREATE OR REPLACE FUNCTION public.create_story_activity()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
 AS $$
 BEGIN
     INSERT INTO public.activity_log (actor_id, activity_type, new_value)
-    VALUES (NEW.user_id, 'note_added', NEW.content);
+    VALUES (NEW.user_id, 'story_added', 'New story');
     
     RETURN NEW;
 END;
 $$;
 
--- Trigger for new notes
-DROP TRIGGER IF EXISTS on_note_insert ON public.notes;
-CREATE TRIGGER on_note_insert
-    AFTER INSERT ON public.notes
+-- Trigger for new stories
+DROP TRIGGER IF EXISTS on_story_insert ON public.stories;
+CREATE TRIGGER on_story_insert
+    AFTER INSERT ON public.stories
     FOR EACH ROW
-    EXECUTE FUNCTION public.create_note_activity();
+    EXECUTE FUNCTION public.create_story_activity();
 
 -- Function to create activity when user joins (profile created)
 CREATE OR REPLACE FUNCTION public.create_joined_activity()

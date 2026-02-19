@@ -184,19 +184,18 @@ export default function ContactsScreen() {
         ) : (
           <TouchableOpacity 
             style={{
-              backgroundColor: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0,0,0,0.03)',
+              backgroundColor: theme.primaryLight,
               paddingHorizontal: s(16),
-              paddingVertical: s(10),
-              borderRadius: s(12),
+              paddingVertical: s(8),
+              borderRadius: s(20),
               borderWidth: 0.5,
               borderColor: theme.border,
             }}
           >
             <Text style={{ 
-              color: theme.textMuted, 
+              color: theme.primary, 
               fontSize: s(13), 
-              fontWeight: '600',
-              fontFamily: theme.fontFamilyMedium,
+              fontWeight: '700',
             }}>
               Invite
             </Text>

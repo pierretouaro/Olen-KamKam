@@ -17,6 +17,7 @@ import { useTheme } from '../../context/ThemeContext';
 import { useHaptics } from '../../hooks/useHaptics';
 import { usePrivacy } from '../../hooks/usePrivacy';
 import { useDataSaver } from '../../hooks/useDataSaver';
+import { useSectionFilter } from '../../context/SectionFilterContext';
 import { useAuth } from '../../context/AuthContext';
 import { 
   Moon, 
@@ -40,6 +41,7 @@ import {
   X,
   Trash2,
   Palette,
+  Filter,
 } from 'lucide-react-native';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'expo-router';
@@ -64,6 +66,7 @@ export default function SettingsScreen() {
   const { trigger } = useHaptics();
   const { settings, updateSetting } = usePrivacy();
   const { dataSaverEnabled, toggleDataSaver } = useDataSaver();
+  const { sectionFilterEnabled, toggleSectionFilter } = useSectionFilter();
   const [storageUsage, setStorageUsage] = useState('0 MB');
   const [messageCount, setMessageCount] = useState(0);
 
@@ -657,6 +660,15 @@ export default function SettingsScreen() {
             hasSwitch
             switchValue={dataSaverEnabled}
             onSwitchChange={toggleDataSaver}
+          />
+          
+          <SettingItem
+            icon={<Filter size={s(22)} color={theme.primary} />}
+            label="Section Filter"
+            description="Show filter tabs (All/Contacts/Groups/Unread) on homepage"
+            hasSwitch
+            switchValue={sectionFilterEnabled}
+            onSwitchChange={toggleSectionFilter}
             isLast
           />
         </SettingsSection>

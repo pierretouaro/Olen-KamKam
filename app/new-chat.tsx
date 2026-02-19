@@ -10,13 +10,15 @@ import {
   Alert,
   RefreshControl,
   Platform,
-  Image, // Added Image import
+  Image,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { BlurView } from 'expo-blur';
 import { useTheme } from '../context/ThemeContext';
 import { useContacts } from '../hooks/useContacts';
 import { useConversations } from '../hooks/useConversations';
+import { useGroups } from '../hooks/useGroups';
+import * as ImagePicker from 'expo-image-picker';
 import { 
   X, 
   Search, 
@@ -25,8 +27,17 @@ import {
   UserPlus, 
   ChevronLeft,
   MessageCircle,
-  Plus
+  Plus,
+  Check,
+  ArrowRight,
+  Camera
 } from 'lucide-react-native';
+
+interface SelectedContact {
+  id: string;
+  name: string;
+  avatar_url?: string;
+}
 
 export default function NewChatScreen() {
   const router = useRouter();
@@ -40,8 +51,15 @@ export default function NewChatScreen() {
     loadContacts 
   } = useContacts();
   const { getOrCreateConversation } = useConversations();
+  const { createGroup, uploadGroupAvatar } = useGroups();
+  
   const [searchQuery, setSearchQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [isGroupMode, setIsGroupMode] = useState(false);
+  const [selectedContacts, setSelectedContacts] = useState<SelectedContact[]>([]);
+  const [groupName, setGroupName] = useState('');
+  const [groupImage, setGroupImage] = useState<string | null>(null);
+  const [showGroupDetails, setShowGroupDetails] = useState(false);
 
   const s = (size: number) => size * scale;
 
@@ -63,6 +81,26 @@ export default function NewChatScreen() {
   };
 
   const handleContactPress = async (contact: any) => {
+    if (isGroupMode) {
+      // Toggle selection in group mode
+      const isSelected = selectedContacts.find(c => c.id === contact.id);
+      if (isSelected) {
+        setSelectedContacts(prev => prev.filter(c => c.id !== contact.id));
+      } else {
+        if (selectedContacts.length >= 50) {
+          Alert.alert('Limit Reached', 'You can only add up to 50 members to a group');
+          return;
+        }
+        setSelectedContacts(prev => [...prev, {
+          id: contact.id,
+          name: contact.name,
+          avatar_url: contact.profile?.avatar_url
+        }]);
+      }
+      return;
+    }
+
+    // Normal direct chat mode
     if (!contact.isAppUser) {
       Alert.alert(
         'Invite Friend',
@@ -88,6 +126,68 @@ export default function NewChatScreen() {
     }
   };
 
+  const handleCreateGroup = async () => {
+    if (selectedContacts.length === 0) {
+      Alert.alert('Error', 'Please select at least one member');
+      return;
+    }
+
+    if (!showGroupDetails) {
+      setShowGroupDetails(true);
+      return;
+    }
+
+    if (!groupName.trim()) {
+      Alert.alert('Error', 'Please enter a group name');
+      return;
+    }
+
+    let avatarUrl = null;
+    if (groupImage) {
+      const tempId = Date.now().toString();
+      avatarUrl = await uploadGroupAvatar(groupImage, tempId);
+    }
+
+    const memberIds = selectedContacts.map(c => c.id);
+    const conversationId = await createGroup(groupName.trim(), avatarUrl, memberIds);
+    
+    if (conversationId) {
+      router.replace(`/chat/${conversationId}`);
+    } else {
+      Alert.alert('Error', 'Failed to create group. Please try again.');
+    }
+  };
+
+  const pickImage = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Required', 'Please grant access to your photo library');
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.8,
+    });
+
+    if (!result.canceled) {
+      setGroupImage(result.assets[0].uri);
+    }
+  };
+
+  const resetGroupMode = () => {
+    if (showGroupDetails) {
+      setShowGroupDetails(false);
+    } else if (isGroupMode) {
+      setIsGroupMode(false);
+      setSelectedContacts([]);
+    } else {
+      router.back();
+    }
+  };
+
   const filteredContacts = contacts.filter(contact =>
     contact.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     contact.phoneNumber.includes(searchQuery)
@@ -100,6 +200,9 @@ export default function NewChatScreen() {
 
   const appUsers = uniqueContacts.filter(c => c.isAppUser);
   const nonAppUsers = uniqueContacts.filter(c => !c.isAppUser);
+
+  const canProceed = selectedContacts.length > 0;
+  const canCreate = groupName.trim().length > 0;
 
   const ContactsSection = ({ children }: { children: React.ReactNode }) => (
     <View style={{
@@ -114,103 +217,114 @@ export default function NewChatScreen() {
     </View>
   );
 
-  const ContactRow = ({ contact, isLast }: { contact: any; isLast: boolean }) => (
-    <TouchableOpacity 
-      style={{
-        padding: s(16),
-        flexDirection: 'row',
-        alignItems: 'center',
-        opacity: contact.isAppUser ? 1 : 0.7,
-        borderBottomWidth: isLast ? 0 : 0.5,
-        borderBottomColor: theme.border,
-      }}
-      onPress={() => handleContactPress(contact)}
-      activeOpacity={0.7}
-    >
-      <View style={{
-        width: s(48),
-        height: s(48),
-        borderRadius: s(24),
-        marginRight: s(16),
-        position: 'relative',
-        overflow: 'hidden',
-        backgroundColor: contact.isAppUser ? theme.primary : theme.textMuted,
-      }}>
-        {contact.profile?.avatar_url ? (
-          <Image 
-            source={{ uri: contact.profile.avatar_url }}
-            style={{ width: '100%', height: '100%' }}
-            resizeMode="cover"
-          />
-        ) : (
-          <View style={{
-            width: '100%',
-            height: '100%',
-            justifyContent: 'center',
-            alignItems: 'center',
-          }}>
-            <Text style={{
-              color: '#fff',
-              fontSize: s(16),
-              fontWeight: '700',
+  const ContactRow = ({ contact, isLast }: { contact: any; isLast: boolean }) => {
+    const isSelected = selectedContacts.find(c => c.id === contact.id);
+    
+    return (
+      <TouchableOpacity 
+        style={{
+          padding: s(16),
+          flexDirection: 'row',
+          alignItems: 'center',
+          opacity: contact.isAppUser ? 1 : 0.7,
+          borderBottomWidth: isLast ? 0 : 0.5,
+          borderBottomColor: theme.border,
+        }}
+        onPress={() => handleContactPress(contact)}
+        activeOpacity={0.7}
+      >
+        <View style={{
+          width: s(48),
+          height: s(48),
+          borderRadius: s(24),
+          marginRight: s(16),
+          position: 'relative',
+          overflow: 'hidden',
+          backgroundColor: contact.isAppUser ? theme.primary : theme.textMuted,
+        }}>
+          {contact.profile?.avatar_url ? (
+            <Image 
+              source={{ uri: contact.profile.avatar_url }}
+              style={{ width: '100%', height: '100%' }}
+              resizeMode="cover"
+            />
+          ) : (
+            <View style={{
+              width: '100%',
+              height: '100%',
+              justifyContent: 'center',
+              alignItems: 'center',
             }}>
-              {contact.name[0]?.toUpperCase()}
+              <Text style={{
+                color: '#fff',
+                fontSize: s(16),
+                fontWeight: '700',
+              }}>
+                {contact.name[0]?.toUpperCase()}
+              </Text>
+            </View>
+          )}
+        </View>
+        
+        <View style={{ flex: 1 }}>
+          <Text style={{
+            color: theme.text,
+            fontSize: s(17),
+            fontWeight: '600',
+            marginBottom: s(2),
+          }}>
+            {contact.name}
+          </Text>
+          <Text style={{
+            color: contact.isAppUser ? theme.primary : theme.textMuted,
+            fontSize: s(14),
+            fontWeight: contact.isAppUser ? '600' : '400',
+          }}>
+            {contact.isAppUser ? 'On Olen' : contact.displayNumber}
+          </Text>
+        </View>
+
+        {!isGroupMode && !contact.isAppUser && (
+          <View style={{
+            backgroundColor: theme.primaryLight,
+            paddingHorizontal: s(16),
+            paddingVertical: s(8),
+            borderRadius: s(20),
+            borderWidth: 0.5,
+            borderColor: theme.border,
+          }}>
+            <Text style={{ 
+              color: theme.primary, 
+              fontSize: s(13), 
+              fontWeight: '700' 
+            }}>
+              Invite
             </Text>
           </View>
         )}
-      </View>
-      
-      <View style={{ flex: 1 }}>
-        <Text style={{
-          color: theme.text,
-          fontSize: s(17),
-          fontWeight: '600',
-          marginBottom: s(2),
-        }}>
-          {contact.name}
-        </Text>
-        <Text style={{
-          color: contact.isAppUser ? theme.primary : theme.textMuted,
-          fontSize: s(14),
-          fontWeight: contact.isAppUser ? '600' : '400',
-        }}>
-          {contact.isAppUser ? 'On Olen' : contact.displayNumber}
-        </Text>
-      </View>
-
-      {!contact.isAppUser && (
-        <View style={{
-          backgroundColor: theme.primaryLight,
-          paddingHorizontal: s(16),
-          paddingVertical: s(8),
-          borderRadius: s(20),
-          borderWidth: 0.5,
-          borderColor: theme.border,
-        }}>
-          <Text style={{ 
-            color: theme.primary, 
-            fontSize: s(13), 
-            fontWeight: '700' 
+        
+        {/* Right side icon - transforms based on mode */}
+        {contact.isAppUser && (
+          <View style={{
+            backgroundColor: isGroupMode 
+              ? (isSelected ? theme.primary : theme.surfaceHighlight)
+              : theme.primaryLight,
+            width: s(36),
+            height: s(36),
+            borderRadius: s(18),
+            justifyContent: 'center',
+            alignItems: 'center',
           }}>
-            Invite
-          </Text>
-        </View>
-      )}
-      
-      {contact.isAppUser && (
-        <View style={{
-          backgroundColor: theme.primaryLight,
-          width: s(36),
-          height: s(36),
-          borderRadius: s(18),
-          justifyContent: 'center',
-          alignItems: 'center',
-        }}>
-          <MessageCircle size={s(20)} color={theme.primary} />
-        </View>
-      )}
-    </TouchableOpacity>
-  );
+            {isGroupMode ? (
+              isSelected ? <Check size={s(20)} color="#fff" /> : <Plus size={s(20)} color={theme.textMuted} />
+            ) : (
+              <MessageCircle size={s(20)} color={theme.primary} />
+            )}
+          </View>
+        )}
+      </TouchableOpacity>
+    );
+  };
 
   const SectionHeader = ({ title, count }: { title: string; count: number }) => (
     <View style={{ 
@@ -310,6 +424,245 @@ export default function NewChatScreen() {
     );
   }
 
+  // Group Details View
+  if (showGroupDetails) {
+    return (
+      <View style={{ flex: 1, backgroundColor: theme.background }}>
+        <StatusBar style={isDark ? 'light' : 'dark'} />
+        
+        {/* Clean Header - matching main view */}
+        <View style={{
+          backgroundColor: theme.background,
+          paddingTop: Platform.OS === 'ios' ? s(60) : s(40),
+          paddingBottom: s(20),
+          paddingHorizontal: s(20),
+        }}>
+          <View style={{ 
+            flexDirection: 'row', 
+            alignItems: 'center', 
+            justifyContent: 'space-between',
+          }}>
+            <TouchableOpacity 
+              onPress={resetGroupMode}
+              style={{
+                width: s(40),
+                height: s(40),
+                borderRadius: s(20),
+                backgroundColor: theme.surfaceHighlight,
+                justifyContent: 'center',
+                alignItems: 'center',
+              }}
+            >
+              <ChevronLeft size={s(24)} color={theme.text} />
+            </TouchableOpacity>
+            
+            <Text style={{
+              color: theme.text,
+              fontSize: s(20),
+              fontWeight: '700',
+            }}>
+              New Group
+            </Text>
+            
+            {canCreate ? (
+              <TouchableOpacity 
+                onPress={handleCreateGroup}
+                style={{
+                  width: s(40),
+                  height: s(40),
+                  borderRadius: s(20),
+                  backgroundColor: theme.primary,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                }}
+              >
+                <Check size={s(22)} color="#fff" />
+              </TouchableOpacity>
+            ) : (
+              <View style={{ width: s(40) }} />
+            )}
+          </View>
+        </View>
+
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={{ padding: s(20) }}
+        >
+          {/* Group Photo */}
+          <TouchableOpacity
+            onPress={pickImage}
+            style={{
+              alignSelf: 'center',
+              width: s(120),
+              height: s(120),
+              borderRadius: s(60),
+              backgroundColor: isDark ? 'rgba(255, 255, 255, 0.03)' : '#fff',
+              borderWidth: 0.5,
+              borderColor: theme.border,
+              justifyContent: 'center',
+              alignItems: 'center',
+              marginBottom: s(24),
+              overflow: 'hidden',
+            }}
+          >
+            {groupImage ? (
+              <Image
+                source={{ uri: groupImage }}
+                style={{ width: '100%', height: '100%' }}
+              />
+            ) : (
+              <>
+                <View style={{
+                  width: s(52),
+                  height: s(52),
+                  borderRadius: s(26),
+                  backgroundColor: theme.primaryLight,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  marginBottom: s(8),
+                }}>
+                  <Camera size={s(26)} color={theme.primary} />
+                </View>
+                <Text style={{
+                  color: theme.textMuted,
+                  fontSize: s(13),
+                  fontWeight: '500',
+                }}>
+                  Add Photo
+                </Text>
+              </>
+            )}
+          </TouchableOpacity>
+
+          {/* Group Name Input - BlurView style matching search bar */}
+          <View style={{ marginBottom: s(24) }}>
+            <View style={{
+              borderRadius: s(28),
+              height: s(56),
+              flexDirection: 'row',
+              alignItems: 'center',
+              overflow: 'hidden',
+              borderWidth: 0.5,
+              borderColor: isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.08)',
+            }}>
+              <BlurView
+                tint={isDark ? 'dark' : 'light'}
+                intensity={60}
+                style={{
+                  ...StyleSheet.absoluteFillObject,
+                  backgroundColor: theme.surface,
+                }}
+              />
+              <TextInput
+                style={{
+                  flex: 1,
+                  color: theme.text,
+                  fontSize: s(16),
+                  marginLeft: s(16),
+                  fontWeight: '500',
+                }}
+                placeholder="Group name..."
+                placeholderTextColor={theme.textMuted}
+                value={groupName}
+                onChangeText={setGroupName}
+                maxLength={50}
+                autoFocus
+              />
+              <Text style={{
+                color: theme.textMuted,
+                fontSize: s(13),
+                marginRight: s(16),
+                fontWeight: '500',
+              }}>
+                {groupName.length}/50
+              </Text>
+            </View>
+          </View>
+
+          {/* Selected Members Section Header */}
+          <View style={{ 
+            marginTop: s(8),
+            marginBottom: s(12),
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+          }}>
+            <Text style={{
+              color: theme.primary,
+              fontSize: s(13),
+              fontWeight: '700',
+              textTransform: 'uppercase',
+              letterSpacing: 1,
+            }}>
+              Members
+            </Text>
+            <Text style={{
+              color: theme.textMuted,
+              fontSize: s(13),
+              fontWeight: '600',
+            }}>
+              {selectedContacts.length}
+            </Text>
+          </View>
+          
+          <ContactsSection>
+            {selectedContacts.map((contact, index) => (
+              <View 
+                key={contact.id}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  padding: s(16),
+                  borderBottomWidth: index < selectedContacts.length - 1 ? 0.5 : 0,
+                  borderBottomColor: theme.border,
+                }}
+              >
+                <View style={{
+                  width: s(44),
+                  height: s(44),
+                  borderRadius: s(22),
+                  backgroundColor: theme.primary,
+                  overflow: 'hidden',
+                  marginRight: s(14),
+                }}>
+                  {contact.avatar_url ? (
+                    <Image
+                      source={{ uri: contact.avatar_url }}
+                      style={{ width: '100%', height: '100%' }}
+                    />
+                  ) : (
+                    <View style={{
+                      width: '100%',
+                      height: '100%',
+                      justifyContent: 'center',
+                      alignItems: 'center',
+                    }}>
+                      <Text style={{
+                        color: '#fff',
+                        fontSize: s(17),
+                        fontWeight: '700',
+                      }}>
+                        {contact.name[0]?.toUpperCase()}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={{
+                  color: theme.text,
+                  fontSize: s(16),
+                  fontWeight: '600',
+                  flex: 1,
+                }}>
+                  {contact.name}
+                </Text>
+              </View>
+            ))}
+          </ContactsSection>
+        </ScrollView>
+      </View>
+    );
+  }
+
   return (
     <View style={{ flex: 1, backgroundColor: theme.background }}>
       <StatusBar style={isDark ? 'light' : 'dark'} />
@@ -330,7 +683,7 @@ export default function NewChatScreen() {
           marginBottom: s(20),
         }}>
           <TouchableOpacity 
-            onPress={() => router.back()} 
+            onPress={resetGroupMode}
             style={{
               width: s(40),
               height: s(40),
@@ -347,22 +700,68 @@ export default function NewChatScreen() {
             fontSize: s(20),
             fontWeight: '700',
           }}>
-            New Chat
+            {isGroupMode ? 'New Group' : 'New Chat'}
           </Text>
-          <TouchableOpacity 
-            onPress={() => router.back()}
-            style={{
-              width: s(40),
-              height: s(40),
-              borderRadius: s(20),
-              backgroundColor: theme.surfaceHighlight,
-              justifyContent: 'center',
-              alignItems: 'center',
-            }}
-          >
-            <X size={s(24)} color={theme.text} />
-          </TouchableOpacity>
+          
+          {isGroupMode && canProceed ? (
+            <TouchableOpacity 
+              onPress={handleCreateGroup}
+              style={{
+                width: s(40),
+                height: s(40),
+                borderRadius: s(20),
+                backgroundColor: theme.primary,
+                justifyContent: 'center',
+                alignItems: 'center',
+              }}
+            >
+              <ArrowRight size={s(22)} color="#fff" />
+            </TouchableOpacity>
+          ) : isGroupMode ? (
+            <TouchableOpacity 
+              onPress={resetGroupMode}
+              style={{
+                width: s(40),
+                height: s(40),
+                borderRadius: s(20),
+                backgroundColor: theme.surfaceHighlight,
+                justifyContent: 'center',
+                alignItems: 'center',
+              }}
+            >
+              <X size={s(24)} color={theme.text} />
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity 
+              onPress={() => router.back()}
+              style={{
+                width: s(40),
+                height: s(40),
+                borderRadius: s(20),
+                backgroundColor: theme.surfaceHighlight,
+                justifyContent: 'center',
+                alignItems: 'center',
+              }}
+            >
+              <X size={s(24)} color={theme.text} />
+            </TouchableOpacity>
+          )}
         </View>
+
+        {/* Selected Count in Group Mode */}
+        {isGroupMode && (
+          <Text style={{
+            color: theme.textMuted,
+            fontSize: s(14),
+            marginBottom: s(12),
+            fontFamily: theme.fontFamilyMedium,
+          }}>
+            {selectedContacts.length > 0 
+              ? `${selectedContacts.length} member${selectedContacts.length > 1 ? 's' : ''} selected`
+              : 'Select at least one contact'
+            }
+          </Text>
+        )}
 
         {/* Search Bar - Floating Blur */}
         <View style={{
@@ -392,7 +791,7 @@ export default function NewChatScreen() {
                 marginLeft: s(12),
                 fontWeight: '500',
               }}
-              placeholder="Search contacts..."
+              placeholder={isGroupMode ? "Search contacts..." : "Search contacts..."}
               placeholderTextColor={theme.textMuted}
               value={searchQuery}
               onChangeText={setSearchQuery}
@@ -413,91 +812,93 @@ export default function NewChatScreen() {
         </View>
       </View>
 
-      {/* Quick Actions */}
-      <View style={{
-        paddingHorizontal: s(20),
-        paddingVertical: s(20),
-        flexDirection: 'row',
-        gap: s(12),
-      }}>
-        <TouchableOpacity 
-          style={{
-            flex: 1,
-            backgroundColor: isDark ? 'rgba(255, 255, 255, 0.03)' : '#fff',
-            borderRadius: s(16),
-            padding: s(16),
-            borderWidth: 0.5,
-            borderColor: theme.border,
-            alignItems: 'center',
-          }}
-          onPress={() => Alert.alert('Coming Soon', 'Group chat feature coming soon!')}
-        >
-          <View style={{
-            backgroundColor: theme.primary,
-            width: s(52),
-            height: s(52),
-            borderRadius: s(26),
-            justifyContent: 'center',
-            alignItems: 'center',
-            marginBottom: s(12),
-          }}>
-            <Users size={s(26)} color="#fff" />
-          </View>
-          <Text style={{
-            color: theme.text,
-            fontSize: s(15),
-            fontWeight: '700',
-          }}>
-            New Group
-          </Text>
-          <Text style={{
-            color: theme.textMuted,
-            fontSize: s(12),
-            marginTop: s(4),
-          }}>
-            Create a group
-          </Text>
-        </TouchableOpacity>
-        
-        <TouchableOpacity 
-          style={{
-            flex: 1,
-            backgroundColor: isDark ? 'rgba(255, 255, 255, 0.03)' : '#fff',
-            borderRadius: s(16),
-            padding: s(16),
-            borderWidth: 0.5,
-            borderColor: theme.border,
-            alignItems: 'center',
-          }}
-          onPress={() => {}}
-        >
-          <View style={{
-            backgroundColor: '#10B981',
-            width: s(52),
-            height: s(52),
-            borderRadius: s(26),
-            justifyContent: 'center',
-            alignItems: 'center',
-            marginBottom: s(12),
-          }}>
-            <UserPlus size={s(26)} color="#fff" />
-          </View>
-          <Text style={{
-            color: theme.text,
-            fontSize: s(15),
-            fontWeight: '700',
-          }}>
-            Add Contact
-          </Text>
-          <Text style={{
-            color: theme.textMuted,
-            fontSize: s(12),
-            marginTop: s(4),
-          }}>
-            Save to phone
-          </Text>
-        </TouchableOpacity>
-      </View>
+      {/* Quick Actions - Hide in Group Mode */}
+      {!isGroupMode && (
+        <View style={{
+          paddingHorizontal: s(20),
+          paddingVertical: s(20),
+          flexDirection: 'row',
+          gap: s(12),
+        }}>
+          <TouchableOpacity 
+            style={{
+              flex: 1,
+              backgroundColor: isDark ? 'rgba(255, 255, 255, 0.03)' : '#fff',
+              borderRadius: s(16),
+              padding: s(16),
+              borderWidth: 0.5,
+              borderColor: theme.border,
+              alignItems: 'center',
+            }}
+            onPress={() => setIsGroupMode(true)}
+          >
+            <View style={{
+              backgroundColor: theme.primary,
+              width: s(52),
+              height: s(52),
+              borderRadius: s(26),
+              justifyContent: 'center',
+              alignItems: 'center',
+              marginBottom: s(12),
+            }}>
+              <Users size={s(26)} color="#fff" />
+            </View>
+            <Text style={{
+              color: theme.text,
+              fontSize: s(15),
+              fontWeight: '700',
+            }}>
+              New Group
+            </Text>
+            <Text style={{
+              color: theme.textMuted,
+              fontSize: s(12),
+              marginTop: s(4),
+            }}>
+              Create a group
+            </Text>
+          </TouchableOpacity>
+          
+          <TouchableOpacity 
+            style={{
+              flex: 1,
+              backgroundColor: isDark ? 'rgba(255, 255, 255, 0.03)' : '#fff',
+              borderRadius: s(16),
+              padding: s(16),
+              borderWidth: 0.5,
+              borderColor: theme.border,
+              alignItems: 'center',
+            }}
+            onPress={() => {}}
+          >
+            <View style={{
+              backgroundColor: '#10B981',
+              width: s(52),
+              height: s(52),
+              borderRadius: s(26),
+              justifyContent: 'center',
+              alignItems: 'center',
+              marginBottom: s(12),
+            }}>
+              <UserPlus size={s(26)} color="#fff" />
+            </View>
+            <Text style={{
+              color: theme.text,
+              fontSize: s(15),
+              fontWeight: '700',
+            }}>
+              Add Contact
+            </Text>
+            <Text style={{
+              color: theme.textMuted,
+              fontSize: s(12),
+              marginTop: s(4),
+            }}>
+              Save to phone
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* Contacts List */}
       <ScrollView
@@ -518,7 +919,7 @@ export default function NewChatScreen() {
         {/* App Users Section */}
         {appUsers.length > 0 && (
           <>
-            <SectionHeader title="Contacts on Olen" count={appUsers.length} />
+            <SectionHeader title={isGroupMode ? "Contacts on Olen" : "Contacts on Olen"} count={appUsers.length} />
             <ContactsSection>
               {appUsers.map((contact, index) => (
                 <ContactRow 
@@ -531,8 +932,8 @@ export default function NewChatScreen() {
           </>
         )}
         
-        {/* Non-App Users Section */}
-        {nonAppUsers.length > 0 && (
+        {/* Non-App Users Section - Hide in Group Mode */}
+        {!isGroupMode && nonAppUsers.length > 0 && (
           <>
             <SectionHeader title="Invite to Olen" count={nonAppUsers.length} />
             <ContactsSection>

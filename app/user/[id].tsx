@@ -1,6 +1,6 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, ScrollView, ActivityIndicator, Image } from 'react-native';
+import { View, Text, TouchableOpacity, ScrollView, ActivityIndicator, Image, Modal, Dimensions } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../context/ThemeContext';
@@ -14,7 +14,8 @@ import {
   MessageCircle,
   Phone as PhoneIcon,
   Video,
-  Clock3
+  Clock3,
+  X
 } from 'lucide-react-native';
 
 interface UserProfile {
@@ -28,9 +29,9 @@ interface UserProfile {
   last_seen?: string;
 }
 
-interface UserNote {
+interface UserStory {
   id: string;
-  content: string;
+  image_url: string;
   created_at: string;
   expires_at: string;
 }
@@ -42,8 +43,9 @@ export default function UserProfileScreen() {
   const insets = useSafeAreaInsets();
   
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [note, setNote] = useState<UserNote | null>(null);
+  const [story, setStory] = useState<UserStory | null>(null);
   const [loading, setLoading] = useState(true);
+  const [viewingStory, setViewingStory] = useState(false);
 
   const s = (size: number) => size * scale;
 
@@ -58,14 +60,14 @@ export default function UserProfileScreen() {
 
   const fetchUserProfile = async () => {
     try {
-      const [{ data: profileData, error: profileError }, { data: noteData }] = await Promise.all([
+      const [{ data: profileData, error: profileError }, { data: storyData }] = await Promise.all([
         supabase
           .from('profiles')
           .select('*')
           .eq('id', userId)
           .single(),
         supabase
-          .from('notes')
+          .from('stories')
           .select('*')
           .eq('user_id', userId)
           .gt('expires_at', new Date().toISOString())
@@ -74,7 +76,7 @@ export default function UserProfileScreen() {
         
       if (profileError) throw profileError;
       setProfile(profileData);
-      setNote(noteData);
+      setStory(storyData);
     } catch (err) {
       console.error('Error fetching profile:', err);
     } finally {
@@ -292,51 +294,57 @@ export default function UserProfileScreen() {
             color: theme.textMuted,
             fontSize: s(16),
             fontFamily: theme.fontFamily,
-            marginBottom: note ? s(16) : s(24),
+            marginBottom: story ? s(16) : s(24),
           }}>
             @{profile.username || 'username'}
           </Text>
 
-          {/* Note Bubble */}
-          {note && (
-            <View style={{
-              backgroundColor: theme.surface,
-              paddingVertical: s(14),
-              paddingHorizontal: s(24),
-              borderRadius: s(32),
-              marginBottom: s(24),
-              minWidth: s(180),
-              maxWidth: s(280),
-              alignItems: 'center',
-            }}>
-              <Text style={{
-                color: theme.text,
-                fontSize: s(15),
-                fontFamily: theme.fontFamily,
-                lineHeight: s(20),
-                textAlign: 'center',
-              }}>
-                {note.content}
-              </Text>
+          {/* Story Preview */}
+          {story && (
+            <TouchableOpacity 
+              onPress={() => setViewingStory(true)}
+              style={{
+                marginBottom: s(24),
+                borderRadius: s(16),
+                overflow: 'hidden',
+                borderWidth: 3,
+                borderColor: theme.primary,
+              }}
+            >
+              <Image
+                source={{ uri: story.image_url }}
+                style={{
+                  width: s(200),
+                  height: s(280),
+                  borderRadius: s(13),
+                }}
+                resizeMode="cover"
+              />
               <View style={{
+                position: 'absolute',
+                bottom: s(12),
+                left: s(12),
                 flexDirection: 'row',
                 alignItems: 'center',
-                marginTop: s(10),
                 gap: s(4),
+                backgroundColor: 'rgba(0,0,0,0.5)',
+                paddingHorizontal: s(8),
+                paddingVertical: s(4),
+                borderRadius: s(12),
               }}>
-                <Clock3 size={s(11)} color={theme.textMuted} />
+                <Clock3 size={s(11)} color="#fff" />
                 <Text style={{
-                  color: theme.textMuted,
+                  color: '#fff',
                   fontSize: s(11),
-                  fontFamily: theme.fontFamily,
+                  fontWeight: '600',
                 }}>
-                  {new Date(note.expires_at).getTime() - Date.now() > 0 
-                    ? `${Math.ceil((new Date(note.expires_at).getTime() - Date.now()) / (1000 * 60 * 60))}h left`
+                  {new Date(story.expires_at).getTime() - Date.now() > 0 
+                    ? `${Math.ceil((new Date(story.expires_at).getTime() - Date.now()) / (1000 * 60 * 60))}h left`
                     : 'Expired'
                   }
                 </Text>
               </View>
-            </View>
+            </TouchableOpacity>
           )}
 
           {/* Action Buttons */}
@@ -416,6 +424,61 @@ export default function UserProfileScreen() {
           />
         </ProfileMenuSection>
       </ScrollView>
+
+      {/* Story Viewer Modal */}
+      <Modal
+        visible={viewingStory}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setViewingStory(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' }}>
+          {story && (
+            <>
+              <Image
+                source={{ uri: story.image_url }}
+                style={{ width: Dimensions.get('window').width, height: Dimensions.get('window').height }}
+                resizeMode="contain"
+              />
+              <TouchableOpacity 
+                onPress={() => setViewingStory(false)}
+                style={{
+                  position: 'absolute',
+                  top: 50,
+                  right: 20,
+                  width: 44,
+                  height: 44,
+                  borderRadius: 22,
+                  backgroundColor: 'rgba(0,0,0,0.5)',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                }}
+              >
+                <X size={28} color="#fff" />
+              </TouchableOpacity>
+              <View style={{
+                position: 'absolute',
+                bottom: 100,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 8,
+                backgroundColor: 'rgba(0,0,0,0.5)',
+                paddingHorizontal: 16,
+                paddingVertical: 8,
+                borderRadius: 20,
+              }}>
+                <Clock3 size={14} color="#fff" />
+                <Text style={{ color: '#fff', fontSize: 14, fontWeight: '600' }}>
+                  {new Date(story.expires_at).getTime() - Date.now() > 0 
+                    ? `${Math.ceil((new Date(story.expires_at).getTime() - Date.now()) / (1000 * 60 * 60))}h left`
+                    : 'Expired'
+                  }
+                </Text>
+              </View>
+            </>
+          )}
+        </View>
+      </Modal>
     </View>
   );
 }

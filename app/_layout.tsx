@@ -4,12 +4,14 @@ import { View, StyleSheet } from 'react-native';
 import { ThemeProvider, useTheme } from '../context/ThemeContext';
 import { useMemo } from 'react';
 import { AuthProvider, useAuth } from '../context/AuthContext';
+import { SectionFilterProvider } from '../context/SectionFilterContext';
 
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useEffect, useState } from 'react';
 import { useRouter, useSegments } from 'expo-router';
 import Animated, { FadeIn } from 'react-native-reanimated';
+import { mediaCache } from '../lib/mediaCache';
 
 function RootLayoutNav() {
   const { theme, isDark } = useTheme();
@@ -17,6 +19,11 @@ function RootLayoutNav() {
   const segments = useSegments();
   const router = useRouter();
   const [isReady, setIsReady] = useState(false);
+
+  // Initialize media cache on app start
+  useEffect(() => {
+    mediaCache.init();
+  }, []);
 
   useEffect(() => {
     if (loading) return;
@@ -118,17 +125,18 @@ function RootLayoutNav() {
             contentStyle: { backgroundColor: theme.background },
           }} 
         />
+
         <Stack.Screen 
-          name="add-note" 
+          name="activity" 
           options={{ 
             headerShown: false,
-            animation: 'slide_from_bottom',
+            animation: 'slide_from_right',
             animationDuration: 200,
             contentStyle: { backgroundColor: theme.background },
           }} 
         />
         <Stack.Screen 
-          name="activity" 
+          name="group-settings/[id]" 
           options={{ 
             headerShown: false,
             animation: 'slide_from_right',
@@ -147,7 +155,9 @@ export default function RootLayout() {
       <SafeAreaProvider style={{ flex: 1, backgroundColor: '#0D0D14' }}>
         <ThemeProvider>
           <AuthProvider>
-            <RootLayoutNav />
+            <SectionFilterProvider>
+              <RootLayoutNav />
+            </SectionFilterProvider>
           </AuthProvider>
         </ThemeProvider>
       </SafeAreaProvider>
