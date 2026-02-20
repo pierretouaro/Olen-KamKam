@@ -123,12 +123,10 @@ export default memo(function VoiceMessage({ audioUrl, duration: initialDuration,
     cacheAudio();
   }, [audioUrl]);
 
-  // Load sound on mount (after caching starts)
+  // Load sound on mount immediately
   useEffect(() => {
     isMounted.current = true;
-    if (!isCaching) {
-      loadSound();
-    }
+    loadSound();
     
     return () => {
       isMounted.current = false;
@@ -145,11 +143,25 @@ export default memo(function VoiceMessage({ audioUrl, duration: initialDuration,
         }
       }
     };
-  }, [cachedUri, isCaching]);
+  }, [cachedUri]);
 
   const loadSound = async () => {
+    await loadSoundAndReturn();
+  };
+
+  const loadSoundAndReturn = async (): Promise<Audio.Sound | null> => {
     try {
       setIsLoading(true);
+      
+      // Set audio mode for voice messages
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        staysActiveInBackground: true,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
+      });
+      
       const { sound: newSound } = await Audio.Sound.createAsync(
         { uri: cachedUri },
         { shouldPlay: false },
@@ -159,7 +171,7 @@ export default memo(function VoiceMessage({ audioUrl, duration: initialDuration,
       if (!isMounted.current) {
         // Component unmounted during load, clean up
         newSound.unloadAsync().catch(() => {});
-        return;
+        return null;
       }
       
       setSound(newSound);
@@ -169,8 +181,11 @@ export default memo(function VoiceMessage({ audioUrl, duration: initialDuration,
       if (status.isLoaded && status.durationMillis) {
         setDurationMs(status.durationMillis);
       }
+      
+      return newSound;
     } catch (error) {
       console.error('Failed to load sound:', error);
+      return null;
     } finally {
       if (isMounted.current) {
         setIsLoading(false);
@@ -195,24 +210,52 @@ export default memo(function VoiceMessage({ audioUrl, duration: initialDuration,
   }, []);
 
   const togglePlayback = async () => {
-    if (!sound || isLoading) return;
+    // Wait for sound to load if needed
+    if (isLoading || isCaching) return;
+    
+    // Use a local ref to track the sound object
+    let currentSound = sound;
+    
+    // If sound hasn't loaded yet, try loading first
+    if (!currentSound) {
+      try {
+        currentSound = await loadSoundAndReturn();
+      } catch (error) {
+        console.error('Failed to load sound on toggle:', error);
+        return;
+      }
+    }
+    
+    if (!currentSound) {
+      console.log('Sound still not available after loading attempt');
+      return;
+    }
 
     try {
-      const status = await sound.getStatusAsync();
-      if (!status.isLoaded) return;
+      const status = await currentSound.getStatusAsync();
+      if (!status.isLoaded) {
+        console.log('Sound not loaded yet');
+        return;
+      }
 
       if (isPlaying) {
-        await sound.pauseAsync();
+        await currentSound.pauseAsync();
       } else {
         // Reset if at end
         if (status.positionMillis >= (status.durationMillis || 0) - 100) {
-          await sound.setPositionAsync(0);
+          await currentSound.setPositionAsync(0);
           progressAnim.value = 0;
         }
-        await sound.playAsync();
+        await currentSound.playAsync();
       }
-    } catch (error) {
-      console.error('Failed to toggle playback:', error);
+    } catch (error: any) {
+      // Handle audio focus error gracefully (silent - happens during calls)
+      if (error?.message?.includes('AudioFocus')) {
+        // Audio focus not available (e.g., during phone call) - silently ignore
+        // The user can try again after the call ends
+      } else {
+        console.error('Failed to toggle playback:', error);
+      }
     }
   };
 

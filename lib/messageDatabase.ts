@@ -90,13 +90,24 @@ class MessageDatabase {
 
     if (this.useSQLite && this.db) {
       try {
-        const stmt = await this.db.prepareAsync(`
-          INSERT OR REPLACE INTO messages (
-            id, conversation_id, sender_id, content, type, metadata,
-            reply_to, edited_at, deleted_at, created_at, read_by,
-            sender_username, sender_full_name, sender_avatar, synced
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-        `);
+        // Check if db is still valid by trying a simple operation
+        let stmt;
+        try {
+          stmt = await this.db.prepareAsync(`
+            INSERT OR REPLACE INTO messages (
+              id, conversation_id, sender_id, content, type, metadata,
+              reply_to, edited_at, deleted_at, created_at, read_by,
+              sender_username, sender_full_name, sender_avatar, synced
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+          `);
+        } catch (prepareError) {
+          // Database connection lost, fallback to AsyncStorage
+          console.log('SQLite connection lost, using AsyncStorage fallback');
+          this.useSQLite = false;
+          this.db = null;
+          this.initialized = false;
+          throw new Error('SQLite not available');
+        }
 
         for (const msg of messages) {
           await stmt.executeAsync([
@@ -122,10 +133,16 @@ class MessageDatabase {
           `INSERT OR REPLACE INTO conversations (id, last_synced) VALUES (?, ?)`,
           [conversationId, new Date().toISOString()]
         );
-      } catch (error) {
-        console.error('SQLite save error:', error);
+      } catch (error: any) {
+        if (error.message === 'SQLite not available') {
+          // Continue to AsyncStorage fallback
+        } else {
+          console.error('SQLite save error:', error);
+        }
       }
-    } else {
+    }
+    
+    if (!this.useSQLite || !this.db) {
       // AsyncStorage fallback - store last 100 messages
       try {
         const existing = await this.getAsyncStorageMessages(conversationId);
@@ -176,9 +193,13 @@ class MessageDatabase {
         return result || [];
       } catch (error) {
         console.error('SQLite get error:', error);
-        return [];
+        // Fallback to AsyncStorage on any SQLite error
+        this.useSQLite = false;
+        this.db = null;
       }
-    } else {
+    }
+    
+    if (!this.useSQLite || !this.db) {
       // AsyncStorage fallback
       const messages = await this.getAsyncStorageMessages(conversationId);
       return messages
@@ -191,6 +212,8 @@ class MessageDatabase {
           synced: 1,
         }));
     }
+    
+    return []; // Fallback if somehow neither branch returns
   }
 
   async savePendingMessage(message: any): Promise<void> {

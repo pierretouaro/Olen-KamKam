@@ -12,6 +12,7 @@ import { useEffect, useState } from 'react';
 import { useRouter, useSegments } from 'expo-router';
 import Animated, { FadeIn } from 'react-native-reanimated';
 import { mediaCache } from '../lib/mediaCache';
+import { useChatPreloader } from '../components/ChatPreloader';
 
 function RootLayoutNav() {
   const { theme, isDark } = useTheme();
@@ -24,6 +25,9 @@ function RootLayoutNav() {
   useEffect(() => {
     mediaCache.init();
   }, []);
+
+  // Preload recent chats in background
+  useChatPreloader();
 
   useEffect(() => {
     if (loading) return;

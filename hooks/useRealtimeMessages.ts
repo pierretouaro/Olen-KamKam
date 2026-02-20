@@ -35,6 +35,7 @@ export const useRealtimeMessages = (conversationId: string | null, userId?: stri
   const messagesRef = useRef<Message[]>([]);
   const hasMoreRef = useRef(true);
   const loadingMoreRef = useRef(false);
+  const recentlySentIds = useRef<Set<string>>(new Set());
   
   useEffect(() => {
     messagesRef.current = messages;
@@ -142,13 +143,24 @@ export const useRealtimeMessages = (conversationId: string | null, userId?: stri
         await messageDb.saveMessages(transformed, conversationId);
       }
 
-      // Update state
+      // Update state with duplicate prevention
       if (isInitial) {
-        setMessages(transformed.reverse());
+        const serverMessages = transformed.reverse();
+        setMessages(prev => {
+          // Keep pending messages (not synced) that aren't on server yet
+          const pendingMsgs = prev.filter(m => !m.synced && !serverMessages.some(s => s.id === m.id));
+          // Merge server messages with pending, avoiding duplicates
+          const serverIds = new Set(serverMessages.map(m => m.id));
+          return [...pendingMsgs, ...serverMessages];
+        });
         setHasMore(transformed.length === MESSAGES_PER_PAGE);
       } else {
-        // Prepend older messages
-        setMessages(prev => [...transformed.reverse(), ...prev]);
+        // Prepend older messages with duplicate check
+        setMessages(prev => {
+          const existingIds = new Set(prev.map(m => m.id));
+          const newMessages = transformed.reverse().filter(m => !existingIds.has(m.id));
+          return [...newMessages, ...prev];
+        });
         setHasMore(transformed.length === MESSAGES_PER_PAGE);
       }
       
@@ -228,6 +240,9 @@ export const useRealtimeMessages = (conversationId: string | null, userId?: stri
       if (data && data.id) {
         await messageDb.updateMessageId(tempId, data.id);
         
+        // Track that we just sent this message to prevent duplicate from subscription
+        recentlySentIds.current.add(data.id);
+        
         // Update UI with real message
         setMessages(prev => 
           prev.map(msg => 
@@ -237,6 +252,11 @@ export const useRealtimeMessages = (conversationId: string | null, userId?: stri
           )
         );
         setPendingMessages(prev => prev.filter(m => m.id !== tempId));
+        
+        // Remove from tracking after 2 seconds (subscription should have fired by then)
+        setTimeout(() => {
+          recentlySentIds.current.delete(data.id);
+        }, 2000);
       }
 
       return data;
@@ -327,30 +347,42 @@ export const useRealtimeMessages = (conversationId: string | null, userId?: stri
         (payload) => {
           if (payload.eventType === 'INSERT') {
             const newMsg = payload.new as any;
-            // Don't add if it's our own optimistic message
-            if (!newMsg.id.startsWith('temp_')) {
-              const transformed: Message = {
-                id: newMsg.id,
-                conversation_id: newMsg.conversation_id,
-                sender_id: newMsg.sender_id,
-                content: newMsg.content,
-                type: newMsg.type,
-                metadata: newMsg.metadata,
-                reply_to: newMsg.reply_to,
-                edited_at: newMsg.edited_at,
-                deleted_at: newMsg.deleted_at,
-                created_at: newMsg.created_at,
-                read_by: newMsg.read_by || [],
-                synced: true,
-              };
+            
+            // Don't add if it's our own optimistic message (starts with temp_)
+            if (newMsg.id.startsWith('temp_')) return;
+            
+            // Don't add if we just sent this message (prevents duplicate)
+            if (recentlySentIds.current.has(newMsg.id)) return;
+            
+            const transformed: Message = {
+              id: newMsg.id,
+              conversation_id: newMsg.conversation_id,
+              sender_id: newMsg.sender_id,
+              content: newMsg.content,
+              type: newMsg.type,
+              metadata: newMsg.metadata,
+              reply_to: newMsg.reply_to,
+              edited_at: newMsg.edited_at,
+              deleted_at: newMsg.deleted_at,
+              created_at: newMsg.created_at,
+              read_by: newMsg.read_by || [],
+              synced: true,
+            };
+            
+            // Add to local DB and state (with duplicate check)
+            setMessages(prev => {
+              // Check if message already exists (by ID or by content+timestamp for media)
+              const exists = prev.find(m => 
+                m.id === transformed.id || 
+                (m.metadata?.image_url && m.metadata.image_url === transformed.metadata?.image_url) ||
+                (m.metadata?.video_url && m.metadata.video_url === transformed.metadata?.video_url)
+              );
+              if (exists) return prev;
               
-              // Add to local DB and state
+              // Save to DB and add to state
               messageDb.saveMessages([transformed], conversationId);
-              setMessages(prev => {
-                if (prev.find(m => m.id === transformed.id)) return prev;
-                return [...prev, transformed];
-              });
-            }
+              return [...prev, transformed];
+            });
           } else if (payload.eventType === 'UPDATE') {
             const updatedMsg = payload.new as any;
             setMessages(prev => 

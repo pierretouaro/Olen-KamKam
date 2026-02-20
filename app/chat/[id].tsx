@@ -7,7 +7,6 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  FlatList,
   Image,
   KeyboardAvoidingView,
   ActivityIndicator,
@@ -18,8 +17,10 @@ import {
   Dimensions,
   Alert,
   Modal,
-  RefreshControl,
 } from 'react-native';
+import { FlashList, FlashListRef } from '@shopify/flash-list';
+
+
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../context/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
@@ -268,6 +269,7 @@ export default function ChatScreen() {
     loadMore,
   } = useRealtimeMessages(id as string, user?.id);
   const [messages, setMessages] = useState<Message[]>([]);
+  const messagesRef = useRef<Message[]>([]);
   const [showHapticPicker, setShowHapticPicker] = useState(false);
   const { sendHapticReaction } = useHapticReactions();
   
@@ -279,7 +281,7 @@ export default function ChatScreen() {
   const [showMediaPicker, setShowMediaPicker] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   
-  const flatListRef = useRef<FlatList>(null);
+  const flashListRef = useRef<FlashListRef<Message>>(null);
   const inputRef = useRef<TextInput>(null);
 
   // File size limits
@@ -449,7 +451,7 @@ export default function ChatScreen() {
   // Keyboard listeners
   useEffect(() => {
     const showSubscription = Keyboard.addListener('keyboardDidShow', () => {
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+      setTimeout(() => flashListRef.current?.scrollToEnd({ animated: true }), 100);
     });
 
     return () => {
@@ -473,11 +475,12 @@ export default function ChatScreen() {
         duration: msg.metadata?.duration,
       }));
       setMessages(transformed);
+      messagesRef.current = transformed;
       
       // Scroll to bottom when messages load initially
       if (supabaseMessages.length > 0 && loading) {
         setTimeout(() => {
-          flatListRef.current?.scrollToEnd({ animated: false });
+          flashListRef.current?.scrollToEnd({ animated: false });
         }, 100);
       }
       
@@ -542,7 +545,7 @@ export default function ChatScreen() {
     setInputText('');
     clearDraft(id as string);
     
-    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+    setTimeout(() => flashListRef.current?.scrollToEnd({ animated: true }), 100);
   };
 
   // Upload voice message to Supabase
@@ -607,7 +610,7 @@ export default function ChatScreen() {
 
     await sendMessageToSupabase('', 'voice', { audio_url: audioUrl, duration });
     
-    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+    setTimeout(() => flashListRef.current?.scrollToEnd({ animated: true }), 100);
   };
 
   // Voice recording handlers
@@ -741,12 +744,14 @@ export default function ChatScreen() {
     };
   }, []);
 
-  // Memoized renderItem for FlatList
+  // Memoized renderItem for FlashList
   const renderMessage = useCallback(({ item, index }: { item: Message; index: number }) => {
     const isMe = item.sender === 'me';
+    // Use item directly from data prop, not from closure
     const previousMessage = index > 0 ? messages[index - 1] : null;
+    const nextMessage = index < messages.length - 1 ? messages[index + 1] : null;
     const showTimestamp = shouldShowTimestamp(item, previousMessage);
-    const isLastInGroup = index === messages.length - 1 || messages[index + 1]?.sender !== item.sender;
+    const isLastInGroup = !nextMessage || nextMessage.sender !== item.sender;
     
     const { isVoice, isHaptic, isImage, isVideo, isFile, hapticPattern } = getMessageType(item);
 
@@ -992,8 +997,8 @@ export default function ChatScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={0}
       >
-        <FlatList
-          ref={flatListRef}
+        <FlashList
+          ref={flashListRef}
           data={messages}
           renderItem={renderMessage}
           keyExtractor={keyExtractor}
@@ -1003,40 +1008,19 @@ export default function ChatScreen() {
           }}
           showsVerticalScrollIndicator={false}
           onContentSizeChange={() => {
-            if (messages.length > 0 && !loadingMore) {
-              flatListRef.current?.scrollToEnd({ animated: false });
+            if (messages.length > 0 && !loadingMore && loading) {
+              flashListRef.current?.scrollToEnd({ animated: false });
             }
           }}
-          onLayout={() => {
-            if (messages.length > 0 && !loadingMore) {
-              flatListRef.current?.scrollToEnd({ animated: false });
-            }
-          }}
-          maintainVisibleContentPosition={{
-            minIndexForVisible: 0,
-            autoscrollToTopThreshold: 10,
-          }}
-          // Performance optimizations
-          maxToRenderPerBatch={5}
-          windowSize={5}
-          initialNumToRender={10}
-          removeClippedSubviews={true}
-          updateCellsBatchingPeriod={50}
-          // Pagination - load more when scrolling to top
-          onScroll={({ nativeEvent }) => {
-            if (nativeEvent.contentOffset.y < 50 && hasMore && !loadingMore) {
+          onEndReached={() => {
+            if (hasMore && !loadingMore) {
               loadMore();
             }
           }}
-          scrollEventThrottle={400}
-          refreshControl={
-            <RefreshControl
-              refreshing={loadingMore}
-              onRefresh={loadMore}
-              tintColor={theme.primary}
-              colors={[theme.primary]}
-            />
-          }
+          onEndReachedThreshold={0.3}
+          ListFooterComponent={loadingMore ? (
+            <ActivityIndicator style={{ margin: 20 }} color={theme.primary} />
+          ) : null}
         />
 
         {/* Modern Input Bar */}

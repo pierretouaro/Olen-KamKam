@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, memo, useEffect } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, Dimensions, Alert, Platform, Modal } from 'react-native';
 import { Play, Pause, Download, X } from 'lucide-react-native';
 import { Video, ResizeMode } from 'expo-av';
+import { Image } from 'expo-image';
 import { useTheme } from '../context/ThemeContext';
 import Reanimated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -9,7 +10,7 @@ import { mediaCache } from '../lib/mediaCache';
 
 interface VideoMessageProps {
   videoUrl: string;
-  duration?: number; // in seconds
+  duration?: number;
   thumbnailUrl?: string;
   isMe: boolean;
   time: string;
@@ -28,42 +29,34 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
   const videoRef = useRef<Video>(null);
   const fullscreenVideoRef = useRef<Video>(null);
   const [status, setStatus] = useState<any>({});
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
+  const [hasStarted, setHasStarted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [fullscreenStatus, setFullscreenStatus] = useState<any>({});
   const [cachedUri, setCachedUri] = useState<string>(videoUrl);
-  const [isCaching, setIsCaching] = useState(false);
+  const [isCached, setIsCached] = useState(false);
   const isMounted = useRef(true);
 
   const s = (size: number) => size * scale;
 
-  // Download and cache video on mount
+  // Check cache on mount (background)
   useEffect(() => {
-    const cacheVideo = async () => {
-      // Check if already cached
+    const checkCache = async () => {
       const existingCache = await mediaCache.getCachedUri(videoUrl, 'video');
       if (existingCache !== videoUrl) {
         setCachedUri(existingCache);
-        return;
+        setIsCached(true);
       }
-      
-      // Start caching in background
-      setIsCaching(true);
-      try {
-        const localUri = await mediaCache.downloadAndCache(videoUrl, 'video');
-        if (isMounted.current) {
+      // Start background caching
+      mediaCache.downloadAndCache(videoUrl, 'video').then((localUri) => {
+        if (isMounted.current && localUri !== videoUrl) {
           setCachedUri(localUri);
+          setIsCached(true);
         }
-      } catch (error) {
-        console.error('Video caching error:', error);
-      } finally {
-        if (isMounted.current) {
-          setIsCaching(false);
-        }
-      }
+      }).catch(() => {});
     };
     
-    cacheVideo();
+    checkCache();
   }, [videoUrl]);
 
   // Progress animation
@@ -73,7 +66,6 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
     isMounted.current = true;
     return () => {
       isMounted.current = false;
-      // Cleanup video on unmount
       if (Platform.OS === 'android') {
         setTimeout(() => {
           if (videoRef.current) {
@@ -106,26 +98,25 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
       if (status.isPlaying) {
         await videoRef.current.pauseAsync();
       } else {
+        setHasStarted(true);
         await videoRef.current.playAsync();
       }
-    } catch (error) {
-      console.error('Video play/pause error:', error);
+    } catch (error: any) {
+      // Handle audio focus error gracefully (silent - happens during calls)
+      if (error?.message?.includes('AudioFocus')) {
+        // Audio focus not available (e.g., during phone call) - silently ignore
+      } else {
+        console.error('Video play/pause error:', error);
+      }
     }
   }, [status.isPlaying]);
 
   const handleDownload = useCallback(async () => {
     try {
-      // Use cached version if available
-      const localUri = cachedUri !== videoUrl 
-        ? cachedUri 
-        : await mediaCache.downloadAndCache(videoUrl, 'video');
-      
+      const localUri = cachedUri !== videoUrl ? cachedUri : await mediaCache.downloadAndCache(videoUrl, 'video');
       const fileName = videoUrl.split('/').pop()?.split('?')[0] || `video_${Date.now()}.mp4`;
       const downloadUri = FileSystem.documentDirectory + fileName;
-      
-      // Copy to documents directory for user access
       await FileSystem.copyAsync({ from: localUri, to: downloadUri });
-      
       Alert.alert('Download Complete', `Video saved to: ${fileName}`);
     } catch (error) {
       console.error('Download error:', error);
@@ -154,21 +145,39 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
       } else {
         await fullscreenVideoRef.current.playAsync();
       }
-    } catch (error) {
-      console.error('Fullscreen video play/pause error:', error);
+    } catch (error: any) {
+      // Handle audio focus error gracefully (silent - happens during calls)
+      if (error?.message?.includes('AudioFocus')) {
+        // Audio focus not available (e.g., during phone call) - silently ignore
+      } else {
+        console.error('Fullscreen video play/pause error:', error);
+      }
     }
   }, [fullscreenStatus.isPlaying]);
 
   const openFullscreen = useCallback(async () => {
     setIsFullscreen(true);
-    // Sync position with main video
+    
+    // Set audio mode for fullscreen video
+    try {
+      const { Audio } = await import('expo-av');
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        staysActiveInBackground: true,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
+      });
+    } catch (error) {
+      console.log('Audio mode setup error:', error);
+    }
+    
     if (videoRef.current && fullscreenVideoRef.current && status.positionMillis) {
       await fullscreenVideoRef.current.setPositionAsync(status.positionMillis);
     }
   }, [status.positionMillis]);
 
   const closeFullscreen = useCallback(async () => {
-    // Sync position back to main video
     if (videoRef.current && fullscreenVideoRef.current && fullscreenStatus.positionMillis) {
       await videoRef.current.setPositionAsync(fullscreenStatus.positionMillis);
     }
@@ -199,22 +208,69 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
           backgroundColor: '#000',
         }}
       >
-        <Video
-          ref={videoRef}
-          source={{ uri: cachedUri }}
-          style={{
-            width: '100%',
-            height: '100%',
-          }}
-          resizeMode={ResizeMode.COVER}
-          isLooping={false}
-          onPlaybackStatusUpdate={onPlaybackStatusUpdate}
-          onLoadStart={() => setIsLoading(true)}
-          onLoad={() => setIsLoading(false)}
-        />
+        {/* Show thumbnail/poster when not playing */}
+        {!hasStarted ? (
+          <View style={{ width: '100%', height: '100%', backgroundColor: '#000' }}>
+            {thumbnailUrl ? (
+              <Image
+                source={{ uri: thumbnailUrl }}
+                style={{ width: '100%', height: '100%' }}
+                contentFit="cover"
+                cachePolicy="disk"
+              />
+            ) : (
+              <View style={{ 
+                width: '100%', 
+                height: '100%', 
+                backgroundColor: isDark ? '#1a1a1a' : '#333',
+                justifyContent: 'center',
+                alignItems: 'center'
+              }}>
+                <Play size={s(48)} color="rgba(255,255,255,0.5)" />
+              </View>
+            )}
+            
+            {/* Play button overlay */}
+            <View style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              justifyContent: 'center',
+              alignItems: 'center',
+            }}>
+              <View style={{
+                width: s(56),
+                height: s(56),
+                borderRadius: s(28),
+                backgroundColor: 'rgba(255,255,255,0.9)',
+                justifyContent: 'center',
+                alignItems: 'center',
+              }}>
+                <Play size={s(28)} color="#000" style={{ marginLeft: s(4) }} />
+              </View>
+            </View>
+          </View>
+        ) : (
+          <Video
+            ref={videoRef}
+            source={{ uri: cachedUri }}
+            style={{
+              width: '100%',
+              height: '100%',
+            }}
+            resizeMode={ResizeMode.COVER}
+            isLooping={false}
+            onPlaybackStatusUpdate={onPlaybackStatusUpdate}
+            onLoadStart={() => setIsLoading(true)}
+            onLoad={() => setIsLoading(false)}
+            shouldPlay={true}
+          />
+        )}
 
         {/* Loading Indicator */}
-        {(isLoading || isCaching) && (
+        {isLoading && hasStarted && (
           <View style={{
             position: 'absolute',
             top: 0,
@@ -223,47 +279,10 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
             bottom: 0,
             justifyContent: 'center',
             alignItems: 'center',
-            backgroundColor: 'rgba(0,0,0,0.5)',
+            backgroundColor: 'rgba(0,0,0,0.3)',
           }}>
             <ActivityIndicator color="#fff" size="large" />
-            {isCaching && (
-              <Text style={{
-                color: 'rgba(255,255,255,0.8)',
-                fontSize: s(12),
-                marginTop: s(8),
-              }}>
-                Caching...
-              </Text>
-            )}
           </View>
-        )}
-
-        {/* Play/Pause Overlay */}
-        {!status.isPlaying && !isLoading && !isCaching && (
-          <TouchableOpacity
-            onPress={handlePlayPause}
-            style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              justifyContent: 'center',
-              alignItems: 'center',
-              backgroundColor: 'rgba(0,0,0,0.3)',
-            }}
-          >
-            <View style={{
-              width: s(56),
-              height: s(56),
-              borderRadius: s(28),
-              backgroundColor: 'rgba(255,255,255,0.9)',
-              justifyContent: 'center',
-              alignItems: 'center',
-            }}>
-              <Play size={s(28)} color="#000" style={{ marginLeft: s(4) }} />
-            </View>
-          </TouchableOpacity>
         )}
 
         {/* Duration Badge */}
@@ -303,24 +322,25 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
           <Download size={s(18)} color="#fff" />
         </TouchableOpacity>
 
-        {/* Fullscreen Hint */}
-        <View style={{
-          position: 'absolute',
-          bottom: s(8),
-          left: s(8),
-          backgroundColor: 'rgba(0,0,0,0.5)',
-          paddingHorizontal: s(8),
-          paddingVertical: s(4),
-          borderRadius: s(6),
-        }}>
-          <Text style={{
-            color: '#fff',
-            fontSize: s(10),
-            fontWeight: '500',
+        {/* Cached indicator */}
+        {isCached && (
+          <View style={{
+            position: 'absolute',
+            bottom: s(8),
+            left: s(8),
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            paddingHorizontal: s(6),
+            paddingVertical: s(2),
+            borderRadius: s(4),
           }}>
-            Tap to expand
-          </Text>
-        </View>
+            <Text style={{
+              color: '#fff',
+              fontSize: s(10),
+            }}>
+              Cached
+            </Text>
+          </View>
+        )}
       </TouchableOpacity>
 
       {/* Controls Bar */}
