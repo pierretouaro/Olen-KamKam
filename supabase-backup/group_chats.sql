@@ -192,7 +192,7 @@ BEGIN
         FROM public.conversations c
         WHERE c.id = p_conversation_id;
     ELSE
-        -- Return direct conversation details (existing logic)
+        -- Return direct conversation details - explicitly filter for OTHER user
         RETURN QUERY
         SELECT 
             p.id as other_user_id,
@@ -204,12 +204,11 @@ BEGIN
             NULL::text as group_name,
             NULL::text as group_avatar,
             false as is_group
-        FROM public.conversation_participants cp
-        JOIN public.conversations c ON c.id = cp.conversation_id
-        JOIN public.conversation_participants cp2 ON cp2.conversation_id = c.id
-        JOIN public.profiles p ON p.id = cp2.user_id
-        WHERE cp.conversation_id = p_conversation_id
-        AND cp2.user_id != cp.user_id
+        FROM public.conversations c
+        JOIN public.conversation_participants cp ON cp.conversation_id = c.id
+        JOIN public.profiles p ON p.id = cp.user_id
+        WHERE c.id = p_conversation_id
+        AND cp.user_id != auth.uid()  -- Only get the OTHER participant, not current user
         LIMIT 1;
     END IF;
 END;

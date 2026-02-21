@@ -126,6 +126,16 @@ class MediaCache {
   }
 
   async downloadAndCache(url: string, type: 'image' | 'video' | 'voice'): Promise<string> {
+    // Validate URL
+    if (!url || typeof url !== 'string') {
+      return url;
+    }
+    
+    // Skip local file URIs - they're already local
+    if (url.startsWith('file://') || url.startsWith('content://')) {
+      return url;
+    }
+    
     // Ensure initialization is complete
     await this.init();
     
@@ -153,8 +163,13 @@ class MediaCache {
         await FileSystem.deleteAsync(localUri).catch(() => {});
       }
       
-      // Download file
-      const downloadResult = await FileSystem.downloadAsync(url, localUri);
+      // Download file with timeout
+      const downloadPromise = FileSystem.downloadAsync(url, localUri);
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Download timeout')), 30000)
+      );
+      
+      const downloadResult = await Promise.race([downloadPromise, timeoutPromise]) as FileSystem.FileSystemDownloadResult;
       
       if (downloadResult.status === 200) {
         // Get file size
@@ -178,7 +193,8 @@ class MediaCache {
         return localUri;
       }
     } catch (error) {
-      console.error('MediaCache download error:', error);
+      // Silently fail - don't spam console with download errors
+      // This is expected for invalid URLs, network issues, etc.
     }
     
     // Return original URL if download failed

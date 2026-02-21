@@ -1,7 +1,10 @@
-import { useState, useRef, useCallback } from 'react';
-import { Audio } from 'expo-av';
-import { Platform } from 'react-native';
-import * as FileSystem from 'expo-file-system';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import {
+  RecordingPresets,
+  RecordingOptions,
+  AudioModule,
+  setAudioModeAsync,
+} from 'expo-audio';
 
 export interface RecordingState {
   isRecording: boolean;
@@ -10,7 +13,51 @@ export interface RecordingState {
   recordingUri: string | null;
 }
 
-export const useVoiceRecorder = () => {
+// Use a simple class-based recorder that doesn't auto-manage lifecycle
+class VoiceRecorder {
+  private recorder: InstanceType<typeof AudioModule['AudioRecorder']> | null = null;
+  private isRecording = false;
+  private uri: string | null = null;
+
+  async prepare(options: RecordingOptions) {
+    // Create recorder using the AudioRecorder constructor from the module
+    const AudioRecorderClass = AudioModule.AudioRecorder;
+    this.recorder = new AudioRecorderClass(options);
+  }
+
+  record() {
+    if (this.recorder) {
+      this.recorder.record();
+      this.isRecording = true;
+    }
+  }
+
+  pause() {
+    if (this.recorder) {
+      this.recorder.pause();
+    }
+  }
+
+  async stop(): Promise<string | null> {
+    if (this.recorder) {
+      await this.recorder.stop();
+      this.isRecording = false;
+      this.uri = this.recorder.uri || null;
+      return this.uri;
+    }
+    return null;
+  }
+
+  get isRecordingActive() {
+    return this.isRecording;
+  }
+
+  get currentUri() {
+    return this.uri;
+  }
+}
+
+export const useVoiceRecorder = (recordingOptions?: RecordingOptions) => {
   const [state, setState] = useState<RecordingState>({
     isRecording: false,
     isPaused: false,
@@ -18,14 +65,22 @@ export const useVoiceRecorder = () => {
     recordingUri: null,
   });
 
-  const recordingRef = useRef<Audio.Recording | null>(null);
+  const recorderRef = useRef<VoiceRecorder | null>(null);
   const durationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef<number>(0);
   const pausedDurationRef = useRef<number>(0);
 
+  // Set up audio mode when component mounts
+  useEffect(() => {
+    setAudioModeAsync({
+      playsInSilentMode: true,
+      allowsRecording: true,
+    });
+  }, []);
+
   const requestPermissions = async (): Promise<boolean> => {
-    const { status } = await Audio.requestPermissionsAsync();
-    return status === 'granted';
+    const status = await AudioModule.requestRecordingPermissionsAsync();
+    return status.granted;
   };
 
   const startRecording = useCallback(async (): Promise<boolean> => {
@@ -36,28 +91,18 @@ export const useVoiceRecorder = () => {
     }
 
     // Check if already recording
-    if (recordingRef.current) {
+    if (state.isRecording) {
       console.log('Already recording, skipping');
       return false;
     }
 
     try {
-      const { Audio } = await import('expo-av');
-      
-      // Configure audio mode for recording
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
-        shouldDuckAndroid: true,
-      });
+      // Create new recorder instance
+      const recorder = new VoiceRecorder();
+      await recorder.prepare(recordingOptions ?? RecordingPresets.HIGH_QUALITY);
+      recorder.record();
+      recorderRef.current = recorder;
 
-      // Create recording instance
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
-
-      recordingRef.current = recording;
       startTimeRef.current = Date.now();
       pausedDurationRef.current = 0;
 
@@ -79,15 +124,15 @@ export const useVoiceRecorder = () => {
       console.error('Failed to start recording:', error);
       return false;
     }
-  }, [])
+  }, [recordingOptions, state.isRecording]);
 
   const pauseRecording = useCallback(async (): Promise<void> => {
-    if (!recordingRef.current || !state.isRecording || state.isPaused) return;
+    if (!state.isRecording || state.isPaused) return;
 
     try {
-      await recordingRef.current.pauseAsync();
+      recorderRef.current?.pause();
       pausedDurationRef.current = Date.now() - startTimeRef.current;
-      
+
       if (durationTimerRef.current) {
         clearInterval(durationTimerRef.current);
         durationTimerRef.current = null;
@@ -100,10 +145,10 @@ export const useVoiceRecorder = () => {
   }, [state.isRecording, state.isPaused]);
 
   const resumeRecording = useCallback(async (): Promise<void> => {
-    if (!recordingRef.current || !state.isRecording || !state.isPaused) return;
+    if (!state.isRecording || !state.isPaused) return;
 
     try {
-      await recordingRef.current.startAsync();
+      recorderRef.current?.record();
       startTimeRef.current = Date.now() - pausedDurationRef.current;
 
       // Resume duration timer
@@ -119,11 +164,9 @@ export const useVoiceRecorder = () => {
   }, [state.isRecording, state.isPaused]);
 
   const stopRecording = useCallback(async (): Promise<string | null> => {
-    if (!recordingRef.current) return null;
+    if (!state.isRecording) return state.recordingUri;
 
     try {
-      const { Audio } = await import('expo-av');
-      
       // Stop timer
       if (durationTimerRef.current) {
         clearInterval(durationTimerRef.current);
@@ -131,18 +174,7 @@ export const useVoiceRecorder = () => {
       }
 
       // Stop recording
-      await recordingRef.current.stopAndUnloadAsync();
-      const uri = recordingRef.current.getURI();
-
-      // Reset audio mode
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
-        shouldDuckAndroid: true,
-      });
-
-      recordingRef.current = null;
+      const uri = await recorderRef.current?.stop() || null;
 
       setState((prev) => ({
         ...prev,
@@ -156,10 +188,10 @@ export const useVoiceRecorder = () => {
       console.error('Failed to stop recording:', error);
       return null;
     }
-  }, []);
+  }, [state.isRecording, state.recordingUri]);
 
   const cancelRecording = useCallback(async (): Promise<void> => {
-    if (!recordingRef.current) return;
+    if (!state.isRecording) return;
 
     try {
       if (durationTimerRef.current) {
@@ -167,8 +199,7 @@ export const useVoiceRecorder = () => {
         durationTimerRef.current = null;
       }
 
-      await recordingRef.current.stopAndUnloadAsync();
-      recordingRef.current = null;
+      await recorderRef.current?.stop();
 
       setState({
         isRecording: false,
@@ -179,12 +210,21 @@ export const useVoiceRecorder = () => {
     } catch (error) {
       console.error('Failed to cancel recording:', error);
     }
-  }, []);
+  }, [state.isRecording]);
 
   const formatDuration = useCallback((seconds: number): string => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
+  }, []);
+
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (durationTimerRef.current) {
+        clearInterval(durationTimerRef.current);
+      }
+    };
   }, []);
 
   return {

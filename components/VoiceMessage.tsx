@@ -1,84 +1,172 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { View, Text, TouchableOpacity, ActivityIndicator, Platform } from 'react-native';
-import { Audio } from 'expo-av';
-import { Play, Pause, Mic } from 'lucide-react-native';
+import { View, Text, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync } from 'expo-audio';
+import { Play, Pause } from 'lucide-react-native';
 import { useTheme } from '../context/ThemeContext';
 import { mediaCache } from '../lib/mediaCache';
 import Reanimated, {
   useSharedValue,
   useAnimatedStyle,
   withTiming,
-  SharedValue,
 } from 'react-native-reanimated';
 
 interface VoiceMessageProps {
   audioUrl: string;
-  duration?: number; // in seconds
+  duration?: number;
   isMe: boolean;
   time: string;
 }
 
-interface WaveformBarProps {
-  height: number;
-  index: number;
-  totalBars: number;
-  progressAnim: SharedValue<number>;
-  activeColor: string;
-  inactiveColor: string;
-  scale: number;
-}
-
-// Individual waveform bar with smooth animation
-const WaveformBar = memo(({ height, index, totalBars, progressAnim, activeColor, inactiveColor, scale }: WaveformBarProps) => {
-  const barStyle = useAnimatedStyle(() => {
-    const barProgress = index / (totalBars - 1);
-    const isActive = progressAnim.value >= barProgress;
-    return {
-      backgroundColor: isActive ? activeColor : inactiveColor,
-    };
-  });
-
-  return (
-    <Reanimated.View
-      style={[
-        {
-          width: scale * 3,
-          height: `${height}%`,
-          borderRadius: scale * 1.5,
-        },
-        barStyle,
-      ]}
-    />
-  );
-});
-
-WaveformBar.displayName = 'WaveformBar';
-
 export default memo(function VoiceMessage({ audioUrl, duration: initialDuration, isMe, time }: VoiceMessageProps) {
   const { theme, isDark, scale } = useTheme();
-  const [sound, setSound] = useState<Audio.Sound | null>(null);
+  
+  const formatTime = useCallback((ms: number): string => {
+    const totalSeconds = Math.floor(ms / 1000);
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  }, []);
+
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [isCaching, setIsCaching] = useState(true);
+  const [, setIsCached] = useState(false);
   const [durationMs, setDurationMs] = useState((initialDuration || 0) * 1000);
-  const [cachedUri, setCachedUri] = useState<string>(audioUrl);
+  const [remainingTime, setRemainingTime] = useState(formatTime((initialDuration || 0) * 1000));
   const progressAnim = useSharedValue(0);
   const isMounted = useRef(true);
+  const isReleased = useRef(false);
+  const playerReadyRef = useRef(false);
 
   const s = (size: number) => size * scale;
   
-  // Memoized waveform heights - generate once and keep stable (0-100 values)
-  const waveformHeights = useRef<number[]>(
-    Array.from({ length: 20 }, (_, i) => {
-      const base = 40;
-      const variation = Math.sin(i * 0.9) * 25;
-      const random = Math.random() * 20;
-      return Math.max(15, Math.min(80, base + variation + random));
-    })
-  );
+  // Track mount/unmount state to prevent operations on released player
+  useEffect(() => {
+    isMounted.current = true;
+    isReleased.current = false;
+    
+    return () => {
+      isMounted.current = false;
+      isReleased.current = true;
+    };
+  }, []);
   
-  // Validate audio URL
-  if (!audioUrl) {
+  const isValidUrl = !!audioUrl;
+
+  // Use expo-audio hook
+  const player = useAudioPlayer(audioUrl);
+  const status = useAudioPlayerStatus(player);
+
+  // Set audio mode when player is ready
+  useEffect(() => {
+    const setupPlayer = async () => {
+      if (!player || !isMounted.current) return;
+      
+      try {
+        setIsLoading(true);
+        
+        await setAudioModeAsync({
+          playsInSilentMode: true,
+          shouldRouteThroughEarpiece: false,
+        });
+        
+        setTimeout(() => {
+          if (status?.duration && isMounted.current) {
+            setDurationMs(status.duration * 1000);
+          }
+          playerReadyRef.current = true;
+          setIsLoading(false);
+        }, 300);
+        
+      } catch {
+        setIsLoading(false);
+      }
+    };
+    
+    setupPlayer();
+  }, [player, status?.duration]);
+
+  // Check cache
+  useEffect(() => {
+    const cacheAudio = async () => {
+      try {
+        const cachedUri = await mediaCache.getCachedUri(audioUrl, 'voice');
+        if (cachedUri !== audioUrl && isMounted.current) {
+          try {
+            player.replace(cachedUri);
+          } catch {
+            // Ignore - player might be released
+          }
+        }
+        
+        const localUri = await mediaCache.downloadAndCache(audioUrl, 'voice');
+        if (isMounted.current && localUri !== audioUrl) {
+          setIsCached(true);
+        }
+      } catch {
+        // Silently ignore cache errors
+      }
+    };
+    
+    cacheAudio();
+  }, [audioUrl, player]);
+
+  // Update play state and progress
+  useEffect(() => {
+    if (!status || !isMounted.current) return;
+    
+    setIsPlaying(status.playing);
+    
+    if (status.duration > 0) {
+      const progress = status.currentTime / status.duration;
+      progressAnim.value = progress;
+    }
+    
+    if (!status.playing && status.currentTime >= status.duration - 0.1 && status.duration > 0) {
+      progressAnim.value = withTiming(0, { duration: 200 });
+      setIsPlaying(false);
+    }
+  }, [status, progressAnim]);
+
+  // Update remaining time
+  useEffect(() => {
+    if (!status) return;
+    const remaining = (status.duration - status.currentTime) * 1000;
+    setRemainingTime(formatTime(Math.max(0, remaining)));
+  }, [status, formatTime]);
+
+  const togglePlayback = async () => {
+    if (isLoading || !player || !playerReadyRef.current || isReleased.current) return;
+
+    try {
+      if (isPlaying) {
+        player.pause();
+      } else {
+        if (status && status.currentTime >= (status.duration || 0) - 0.1) {
+          player.seekTo(0);
+          progressAnim.value = 0;
+        }
+        player.play();
+      }
+    } catch (error: any) {
+      if (error?.message?.includes('released')) {
+        setIsPlaying(false);
+        isReleased.current = true;
+      }
+    }
+  };
+
+  // Animated style for progress bar
+  const progressStyle = useAnimatedStyle(() => ({
+    width: `${progressAnim.value * 100}%`,
+  }));
+
+  // Colors
+  const playButtonBgColor = isMe ? 'rgba(255,255,255,0.2)' : (isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)');
+  const playButtonIconColor = isMe ? '#fff' : theme.textMuted;
+  const activeWaveColor = isMe ? '#fff' : theme.textMuted;
+  const inactiveWaveColor = isMe ? 'rgba(255,255,255,0.3)' : (isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)');
+
+  if (!isValidUrl) {
     return (
       <View style={{
         maxWidth: '75%',
@@ -94,202 +182,6 @@ export default memo(function VoiceMessage({ audioUrl, duration: initialDuration,
     );
   }
 
-  // Cache audio on mount
-  useEffect(() => {
-    const cacheAudio = async () => {
-      // Check if already cached
-      const existingCache = await mediaCache.getCachedUri(audioUrl, 'voice');
-      if (existingCache !== audioUrl) {
-        setCachedUri(existingCache);
-        setIsCaching(false);
-        return;
-      }
-      
-      // Cache in background
-      try {
-        const localUri = await mediaCache.downloadAndCache(audioUrl, 'voice');
-        if (isMounted.current) {
-          setCachedUri(localUri);
-        }
-      } catch (error) {
-        console.error('Voice caching error:', error);
-      } finally {
-        if (isMounted.current) {
-          setIsCaching(false);
-        }
-      }
-    };
-    
-    cacheAudio();
-  }, [audioUrl]);
-
-  // Load sound on mount immediately
-  useEffect(() => {
-    isMounted.current = true;
-    loadSound();
-    
-    return () => {
-      isMounted.current = false;
-      // Use setImmediate to ensure cleanup happens on next tick
-      if (Platform.OS === 'android') {
-        setTimeout(() => {
-          if (sound) {
-            sound.unloadAsync().catch(() => {});
-          }
-        }, 0);
-      } else {
-        if (sound) {
-          sound.unloadAsync().catch(() => {});
-        }
-      }
-    };
-  }, [cachedUri]);
-
-  const loadSound = async () => {
-    await loadSoundAndReturn();
-  };
-
-  const loadSoundAndReturn = async (): Promise<Audio.Sound | null> => {
-    try {
-      setIsLoading(true);
-      
-      // Set audio mode for voice messages
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        staysActiveInBackground: true,
-        playsInSilentModeIOS: true,
-        shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: false,
-      });
-      
-      const { sound: newSound } = await Audio.Sound.createAsync(
-        { uri: cachedUri },
-        { shouldPlay: false },
-        onPlaybackStatusUpdate
-      );
-      
-      if (!isMounted.current) {
-        // Component unmounted during load, clean up
-        newSound.unloadAsync().catch(() => {});
-        return null;
-      }
-      
-      setSound(newSound);
-      
-      // Get duration
-      const status = await newSound.getStatusAsync();
-      if (status.isLoaded && status.durationMillis) {
-        setDurationMs(status.durationMillis);
-      }
-      
-      return newSound;
-    } catch (error) {
-      console.error('Failed to load sound:', error);
-      return null;
-    } finally {
-      if (isMounted.current) {
-        setIsLoading(false);
-      }
-    }
-  };
-
-  const onPlaybackStatusUpdate = useCallback((status: any) => {
-    if (!status.isLoaded || !isMounted.current) return;
-
-    setIsPlaying(status.isPlaying);
-    
-    // Update progress animation smoothly using milliseconds
-    if (status.durationMillis > 0) {
-      const progress = status.positionMillis / status.durationMillis;
-      progressAnim.value = progress;
-    }
-
-    if (status.didJustFinish && isMounted.current) {
-      progressAnim.value = withTiming(0, { duration: 200 });
-    }
-  }, []);
-
-  const togglePlayback = async () => {
-    // Wait for sound to load if needed
-    if (isLoading || isCaching) return;
-    
-    // Use a local ref to track the sound object
-    let currentSound = sound;
-    
-    // If sound hasn't loaded yet, try loading first
-    if (!currentSound) {
-      try {
-        currentSound = await loadSoundAndReturn();
-      } catch (error) {
-        console.error('Failed to load sound on toggle:', error);
-        return;
-      }
-    }
-    
-    if (!currentSound) {
-      console.log('Sound still not available after loading attempt');
-      return;
-    }
-
-    try {
-      const status = await currentSound.getStatusAsync();
-      if (!status.isLoaded) {
-        console.log('Sound not loaded yet');
-        return;
-      }
-
-      if (isPlaying) {
-        await currentSound.pauseAsync();
-      } else {
-        // Reset if at end
-        if (status.positionMillis >= (status.durationMillis || 0) - 100) {
-          await currentSound.setPositionAsync(0);
-          progressAnim.value = 0;
-        }
-        await currentSound.playAsync();
-      }
-    } catch (error: any) {
-      // Handle audio focus error gracefully (silent - happens during calls)
-      if (error?.message?.includes('AudioFocus')) {
-        // Audio focus not available (e.g., during phone call) - silently ignore
-        // The user can try again after the call ends
-      } else {
-        console.error('Failed to toggle playback:', error);
-      }
-    }
-  };
-
-  const formatTime = (ms: number): string => {
-    const totalSeconds = Math.floor(ms / 1000);
-    const mins = Math.floor(totalSeconds / 60);
-    const secs = totalSeconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  // Animated style for smooth progress bar
-  const progressStyle = useAnimatedStyle(() => ({
-    width: `${progressAnim.value * 100}%`,
-  }));
-
-  // Calculate duration text from animated value
-  const [remainingTime, setRemainingTime] = useState(formatTime(durationMs));
-  
-  useEffect(() => {
-    // Update remaining time display based on progress
-    const interval = setInterval(() => {
-      const currentProgress = progressAnim.value;
-      const remaining = durationMs * (1 - currentProgress);
-      setRemainingTime(formatTime(remaining));
-    }, 100);
-    return () => clearInterval(interval);
-  }, [durationMs]);
-
-  // Colors for received messages should match the muted text color (like date pill)
-  const playButtonBgColor = isMe ? 'rgba(255,255,255,0.2)' : (isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)');
-  const playButtonIconColor = isMe ? '#fff' : theme.textMuted;
-  const activeWaveColor = isMe ? '#fff' : theme.textMuted;
-  const inactiveWaveColor = isMe ? 'rgba(255,255,255,0.3)' : (isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)');
-
   return (
     <View style={{
       width: '65%',
@@ -300,10 +192,10 @@ export default memo(function VoiceMessage({ audioUrl, duration: initialDuration,
       marginHorizontal: s(8),
     }}>
       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-        {/* Play/Pause Button - Uses muted color for received messages */}
+        {/* Play/Pause Button */}
         <TouchableOpacity
           onPress={togglePlayback}
-          disabled={isLoading || isCaching}
+          disabled={isLoading}
           style={{
             width: s(40),
             height: s(40),
@@ -314,7 +206,7 @@ export default memo(function VoiceMessage({ audioUrl, duration: initialDuration,
             marginRight: s(12),
           }}
         >
-          {isLoading || isCaching ? (
+          {isLoading ? (
             <ActivityIndicator size="small" color={playButtonIconColor} />
           ) : isPlaying ? (
             <Pause size={s(20)} color={playButtonIconColor} />
@@ -323,41 +215,28 @@ export default memo(function VoiceMessage({ audioUrl, duration: initialDuration,
           )}
         </TouchableOpacity>
 
-        {/* Waveform and Progress */}
+        {/* Simplified Waveform - Static line with single animated progress */}
         <View style={{ flex: 1 }}>
-          {/* Waveform bars - Smooth animated */}
+          {/* Static waveform visualization */}
           <View style={{ 
-            flexDirection: 'row', 
-            alignItems: 'center', 
-            justifyContent: 'space-between',
             height: s(32), 
             marginBottom: s(6),
+            justifyContent: 'center',
           }}>
-            {waveformHeights.current.map((height, i) => (
-              <WaveformBar
-                key={i}
-                height={height}
-                index={i}
-                totalBars={20}
-                progressAnim={progressAnim}
-                activeColor={activeWaveColor}
-                inactiveColor={inactiveWaveColor}
-                scale={scale}
-              />
-            ))}
-          </View>
-
-          {/* Progress bar */}
-          <View style={{
-            height: s(2),
-            backgroundColor: isMe ? 'rgba(255,255,255,0.3)' : (isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)'),
-            borderRadius: s(1),
-            overflow: 'hidden',
-          }}>
+            {/* Background track */}
+            <View style={{
+              height: s(2),
+              backgroundColor: inactiveWaveColor,
+              borderRadius: s(1),
+            }} />
+            
+            {/* Animated progress fill */}
             <Reanimated.View
               style={[
                 {
-                  height: '100%',
+                  position: 'absolute',
+                  left: 0,
+                  height: s(2),
                   backgroundColor: activeWaveColor,
                   borderRadius: s(1),
                 },
@@ -376,16 +255,16 @@ export default memo(function VoiceMessage({ audioUrl, duration: initialDuration,
           minWidth: s(38),
           textAlign: 'right',
         }}>
-          {remainingTime}
+          {isPlaying ? remainingTime : formatTime(durationMs)}
         </Text>
       </View>
 
-      {/* Time */}
+      {/* Time label */}
       <Text style={{
         color: isMe ? 'rgba(255,255,255,0.6)' : theme.textMuted,
         fontSize: s(10),
         marginTop: s(4),
-        textAlign: 'right',
+        marginLeft: s(52),
       }}>
         {time}
       </Text>

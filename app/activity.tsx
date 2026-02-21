@@ -3,9 +3,9 @@ import {
   View,
   Text,
   TouchableOpacity,
-  ScrollView,
   ActivityIndicator,
   RefreshControl,
+  ScrollView,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Image } from 'expo-image';
@@ -301,6 +301,7 @@ export default function ActivityScreen() {
       </View>
 
       <ScrollView
+        showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.primary} />
         }

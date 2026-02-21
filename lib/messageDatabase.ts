@@ -86,10 +86,19 @@ class MessageDatabase {
   }
 
   async saveMessages(messages: any[], conversationId: string): Promise<void> {
+    // Validate inputs
+    if (!conversationId || typeof conversationId !== 'string') return;
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    
     await this.init();
 
     if (this.useSQLite && this.db) {
       try {
+        // Ensure db is still valid
+        if (!this.db) {
+          throw new Error('SQLite not available');
+        }
+        
         // Check if db is still valid by trying a simple operation
         let stmt;
         try {
@@ -102,7 +111,6 @@ class MessageDatabase {
           `);
         } catch (prepareError) {
           // Database connection lost, fallback to AsyncStorage
-          console.log('SQLite connection lost, using AsyncStorage fallback');
           this.useSQLite = false;
           this.db = null;
           this.initialized = false;
@@ -110,17 +118,19 @@ class MessageDatabase {
         }
 
         for (const msg of messages) {
+          if (!msg || !msg.id) continue; // Skip invalid messages
+          
           await stmt.executeAsync([
             msg.id,
             conversationId,
-            msg.sender_id,
+            msg.sender_id || '',
             msg.content || '',
             msg.type || 'text',
             JSON.stringify(msg.metadata || {}),
             msg.reply_to || null,
             msg.edited_at || null,
             msg.deleted_at || null,
-            msg.created_at,
+            msg.created_at || new Date().toISOString(),
             JSON.stringify(msg.read_by || []),
             msg.sender?.username || msg.sender_username || '',
             msg.sender?.full_name || msg.sender_full_name || '',
@@ -137,7 +147,7 @@ class MessageDatabase {
         if (error.message === 'SQLite not available') {
           // Continue to AsyncStorage fallback
         } else {
-          console.error('SQLite save error:', error);
+          // Silently fall back to AsyncStorage
         }
       }
     }
@@ -182,8 +192,18 @@ class MessageDatabase {
   ): Promise<LocalMessage[]> {
     await this.init();
 
+    // Validate inputs to prevent null pointer exceptions
+    if (!conversationId || typeof conversationId !== 'string') {
+      return [];
+    }
+
     if (this.useSQLite && this.db) {
       try {
+        // Ensure db connection is still valid
+        if (!this.db) {
+          throw new Error('Database connection lost');
+        }
+        
         const result = await this.db.getAllAsync(`
           SELECT * FROM messages 
           WHERE conversation_id = ? AND deleted_at IS NULL
@@ -192,8 +212,7 @@ class MessageDatabase {
         `, [conversationId, limit, offset]);
         return result || [];
       } catch (error) {
-        console.error('SQLite get error:', error);
-        // Fallback to AsyncStorage on any SQLite error
+        // Silently fall back to AsyncStorage on SQLite errors
         this.useSQLite = false;
         this.db = null;
       }

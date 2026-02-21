@@ -214,6 +214,7 @@ export const useRealtimeMessages = (conversationId: string | null, userId?: stri
     };
 
     // Add to pending and show immediately
+    console.log('DEBUG: Adding optimistic message:', optimisticMessage.id);
     setPendingMessages(prev => [...prev, optimisticMessage]);
     setMessages(prev => [...prev, optimisticMessage]);
 
@@ -230,24 +231,32 @@ export const useRealtimeMessages = (conversationId: string | null, userId?: stri
         p_reply_to: replyTo || null
       });
 
+      console.log('DEBUG: send_message RPC raw response:', JSON.stringify(data));
+      
       if (error) {
         console.error('Error sending message:', error);
-        // Keep the pending message but mark as failed
         return null;
       }
 
-      // Update local DB with real ID
-      if (data && data.id) {
-        await messageDb.updateMessageId(tempId, data.id);
+      // Handle both array and object responses from RPC
+      const messageData = Array.isArray(data) ? data[0] : data;
+      const realId = messageData?.id;
+      
+      console.log('DEBUG: Extracted realId:', realId, 'messageData:', messageData);
+      
+      if (realId) {
+        await messageDb.updateMessageId(tempId, realId);
         
         // Track that we just sent this message to prevent duplicate from subscription
-        recentlySentIds.current.add(data.id);
+        console.log('DEBUG: Adding to recentlySentIds:', realId, 'current size:', recentlySentIds.current.size);
+        recentlySentIds.current.add(realId);
+        console.log('DEBUG: recentlySentIds after add:', recentlySentIds.current.size, 'has:', recentlySentIds.current.has(realId));
         
         // Update UI with real message
         setMessages(prev => 
           prev.map(msg => 
             msg.id === tempId 
-              ? { ...msg, id: data.id, synced: true }
+              ? { ...msg, id: realId, synced: true }
               : msg
           )
         );
@@ -255,11 +264,11 @@ export const useRealtimeMessages = (conversationId: string | null, userId?: stri
         
         // Remove from tracking after 2 seconds (subscription should have fired by then)
         setTimeout(() => {
-          recentlySentIds.current.delete(data.id);
+          recentlySentIds.current.delete(realId);
         }, 2000);
       }
 
-      return data;
+      return messageData;
     } catch (err) {
       console.error('Error sending message:', err);
       return null;
@@ -348,11 +357,20 @@ export const useRealtimeMessages = (conversationId: string | null, userId?: stri
           if (payload.eventType === 'INSERT') {
             const newMsg = payload.new as any;
             
+            console.log('DEBUG: Realtime INSERT received:', newMsg.id, 'sender:', newMsg.sender_id, 'content:', newMsg.content?.substring(0, 20));
+            
             // Don't add if it's our own optimistic message (starts with temp_)
-            if (newMsg.id.startsWith('temp_')) return;
+            if (newMsg.id.startsWith('temp_')) {
+              console.log('DEBUG: Skipping temp message');
+              return;
+            }
             
             // Don't add if we just sent this message (prevents duplicate)
-            if (recentlySentIds.current.has(newMsg.id)) return;
+            console.log('DEBUG: Checking recentlySentIds for:', newMsg.id, 'size:', recentlySentIds.current.size, 'has:', recentlySentIds.current.has(newMsg.id));
+            if (recentlySentIds.current.has(newMsg.id)) {
+              console.log('DEBUG: Skipping recently sent message:', newMsg.id);
+              return;
+            }
             
             const transformed: Message = {
               id: newMsg.id,
@@ -370,6 +388,7 @@ export const useRealtimeMessages = (conversationId: string | null, userId?: stri
             };
             
             // Add to local DB and state (with duplicate check)
+            console.log('DEBUG: Adding message from subscription:', transformed.id);
             setMessages(prev => {
               // Check if message already exists (by ID or by content+timestamp for media)
               const exists = prev.find(m => 

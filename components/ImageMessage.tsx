@@ -1,4 +1,4 @@
-import { useState, useCallback, memo } from 'react';
+import { useState, useCallback, memo, useEffect } from 'react';
 import { View, Text, TouchableOpacity, Modal, Dimensions, ActivityIndicator } from 'react-native';
 import { Image } from 'expo-image';
 import { X, Download } from 'lucide-react-native';
@@ -14,16 +14,32 @@ interface ImageMessageProps {
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-// Default blurhash for image placeholder (light gray)
-const DEFAULT_BLURHASH = 'LKO2?U%2Tw=w]~RBVZRi};RPxuwH';
-
 export default memo(function ImageMessage({ imageUrl, isMe, time }: ImageMessageProps) {
   const { theme, isDark, scale } = useTheme();
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
+  const [displayUri, setDisplayUri] = useState<string>(imageUrl);
 
   const s = (size: number) => size * scale;
+
+  // Check cache on mount and use cached URI if available
+  useEffect(() => {
+    const loadCachedImage = async () => {
+      const cachedUri = await mediaCache.getCachedUri(imageUrl, 'image');
+      if (cachedUri !== imageUrl) {
+        setDisplayUri(cachedUri);
+      }
+      // Also trigger background caching
+      mediaCache.downloadAndCache(imageUrl, 'image').then((localUri) => {
+        if (localUri !== imageUrl) {
+          setDisplayUri(localUri);
+        }
+      }).catch(() => {});
+    };
+    
+    loadCachedImage();
+  }, [imageUrl]);
 
   const handleDownload = useCallback(async () => {
     try {
@@ -71,7 +87,7 @@ export default memo(function ImageMessage({ imageUrl, isMe, time }: ImageMessage
           overflow: 'hidden',
         }}>
           <Image
-            source={{ uri: imageUrl }}
+            source={{ uri: displayUri }}
             style={{
               width: s(200),
               height: s(200),
@@ -79,11 +95,9 @@ export default memo(function ImageMessage({ imageUrl, isMe, time }: ImageMessage
               backgroundColor: theme.surfaceHighlight,
             }}
             contentFit="cover"
-            transition={200}
-            cachePolicy="disk"
-            priority="high"
-            placeholder={DEFAULT_BLURHASH}
-            placeholderContentFit="cover"
+            transition={100}
+            cachePolicy="memory-disk"
+            priority="low"
             onLoadStart={() => setIsLoading(true)}
             onLoadEnd={() => setIsLoading(false)}
             onError={() => {
@@ -182,17 +196,15 @@ export default memo(function ImageMessage({ imageUrl, isMe, time }: ImageMessage
 
           {/* Fullscreen Image */}
           <Image
-            source={{ uri: imageUrl }}
+            source={{ uri: displayUri }}
             style={{
               width: SCREEN_WIDTH,
               height: SCREEN_HEIGHT * 0.7,
             }}
             contentFit="contain"
-            cachePolicy="disk"
-            priority="high"
-            transition={300}
-            placeholder={DEFAULT_BLURHASH}
-            placeholderContentFit="contain"
+            cachePolicy="memory-disk"
+            priority="low"
+            transition={200}
           />
 
           {/* Hint text */}

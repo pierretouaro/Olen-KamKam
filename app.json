@@ -61,7 +61,9 @@
           "photosPermission": "Allow Olen to access your photos to share them in chats."
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      "expo-audio",
+      "expo-video"
     ],
     "experiments": {
       "typedRoutes": true,

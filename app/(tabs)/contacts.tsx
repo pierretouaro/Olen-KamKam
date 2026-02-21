@@ -1,14 +1,14 @@
 import { 
   View, 
   Text, 
-  ScrollView, 
   TouchableOpacity, 
   StyleSheet,
   TextInput,
   RefreshControl,
   ActivityIndicator,
   Platform,
-  Image, // Added Image import
+  Image,
+  ScrollView,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { useRouter } from 'expo-router';
@@ -83,20 +83,7 @@ export default function ContactsScreen() {
   const appUsers = filteredContacts.filter(c => c.isAppUser);
   const nonAppUsers = filteredContacts.filter(c => !c.isAppUser);
 
-  const ContactsSection = ({ children }: { children: React.ReactNode }) => (
-    <View style={{
-      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.03)' : '#fff',
-      borderRadius: s(16),
-      marginBottom: s(12),
-      borderWidth: 0.5,
-      borderColor: theme.border,
-      overflow: 'hidden',
-    }}>
-      {children}
-    </View>
-  );
-
-  const ContactRow = ({ contact, isLast }: { contact: any; isLast: boolean }) => (
+  const ContactRow = ({ contact, isLast }: { contact: any; isLast?: boolean }) => (
     <Animated.View entering={FadeInUp.duration(300).delay(0)}>
       <TouchableOpacity 
         style={{
@@ -240,6 +227,18 @@ export default function ContactsScreen() {
           {count}
         </Text>
       </View>
+    </View>
+  );
+
+  const ContactsSection = ({ children }: { children: React.ReactNode }) => (
+    <View style={{
+      borderRadius: s(16),
+      overflow: 'hidden',
+      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.03)' : '#fff',
+      borderWidth: 0.5,
+      borderColor: theme.border,
+    }}>
+      {children}
     </View>
   );
 
@@ -419,7 +418,7 @@ export default function ContactsScreen() {
       </View>
 
       {/* Friends List */}
-      <ScrollView
+      <ScrollView 
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ 
           padding: s(20),
@@ -434,14 +433,13 @@ export default function ContactsScreen() {
           />
         }
       >
-        {/* App Users Section */}
         {appUsers.length > 0 && (
           <>
             <SectionHeader title="Friends on Olen" count={appUsers.length} />
             <ContactsSection>
               {appUsers.map((contact, index) => (
                 <ContactRow 
-                  key={contact.id || contact.phoneNumber} 
+                  key={contact.id || contact.phoneNumber || `app-${index}`} 
                   contact={contact} 
                   isLast={index === appUsers.length - 1} 
                 />
@@ -450,14 +448,13 @@ export default function ContactsScreen() {
           </>
         )}
         
-        {/* Non-App Users Section */}
         {nonAppUsers.length > 0 && (
           <>
             <SectionHeader title="Contacts" count={nonAppUsers.length} />
             <ContactsSection>
               {nonAppUsers.map((contact, index) => (
                 <ContactRow 
-                  key={contact.id || contact.phoneNumber} 
+                  key={contact.id || contact.phoneNumber || `non-app-${index}`} 
                   contact={contact} 
                   isLast={index === nonAppUsers.length - 1} 
                 />
@@ -467,7 +464,7 @@ export default function ContactsScreen() {
         )}
         
         {/* Empty State */}
-        {appUsers.length === 0 && nonAppUsers.length === 0 && !loading && (
+        {filteredContacts.length === 0 && !loading && (
           <View style={{ 
             padding: s(40), 
             alignItems: 'center',

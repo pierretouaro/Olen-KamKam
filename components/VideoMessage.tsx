@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, memo, useEffect } from 'react';
-import { View, Text, TouchableOpacity, ActivityIndicator, Dimensions, Alert, Platform, Modal } from 'react-native';
+import { View, Text, TouchableOpacity, ActivityIndicator, Dimensions, Alert, Modal } from 'react-native';
 import { Play, Pause, Download, X } from 'lucide-react-native';
-import { Video, ResizeMode } from 'expo-av';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import { Image } from 'expo-image';
 import { useTheme } from '../context/ThemeContext';
 import Reanimated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
@@ -26,30 +26,71 @@ const formatTime = (seconds: number): string => {
 
 export default memo(function VideoMessage({ videoUrl, duration: initialDuration, thumbnailUrl, isMe, time }: VideoMessageProps) {
   const { theme, isDark, scale } = useTheme();
-  const videoRef = useRef<Video>(null);
-  const fullscreenVideoRef = useRef<Video>(null);
-  const [status, setStatus] = useState<any>({});
   const [isLoading, setIsLoading] = useState(false);
   const [hasStarted, setHasStarted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [fullscreenStatus, setFullscreenStatus] = useState<any>({});
   const [cachedUri, setCachedUri] = useState<string>(videoUrl);
   const [isCached, setIsCached] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [totalDuration, setTotalDuration] = useState(initialDuration || 0);
   const isMounted = useRef(true);
+  const isReleased = useRef(false);
+  const progressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const s = (size: number) => size * scale;
+  
+  // Track mount/unmount state to prevent operations on released player
+  useEffect(() => {
+    isMounted.current = true;
+    isReleased.current = false;
+    
+    return () => {
+      isMounted.current = false;
+      isReleased.current = true;
+      
+      // Delay cleanup to prevent race conditions
+      setTimeout(() => {
+        try {
+          if (progressIntervalRef.current) {
+            clearInterval(progressIntervalRef.current);
+            progressIntervalRef.current = null;
+          }
+        } catch {
+          // Ignore cleanup errors
+        }
+      }, 50);
+    };
+  }, []);
 
-  // Check cache on mount (background)
+  // Create video player for inline video (start with original URL)
+  const player = useVideoPlayer(videoUrl, (player) => {
+    player.loop = false;
+    player.timeUpdateEventInterval = 0.25;
+  });
+
+  // Create video player for fullscreen
+  const fullscreenPlayer = useVideoPlayer(videoUrl, (player) => {
+    player.loop = false;
+    player.timeUpdateEventInterval = 0.25;
+  });
+
+  // Check cache on mount and switch to cached URI when available
   useEffect(() => {
     const checkCache = async () => {
+      // First check if already cached
       const existingCache = await mediaCache.getCachedUri(videoUrl, 'video');
       if (existingCache !== videoUrl) {
         setCachedUri(existingCache);
         setIsCached(true);
+        // Replace player source with cached version for smoother playback
+        // Silently ignore errors - player might be released during unmount
+        player.replaceAsync(existingCache).catch(() => {});
       }
-      // Start background caching
+      
+      // Start background caching for future loads
       mediaCache.downloadAndCache(videoUrl, 'video').then((localUri) => {
-        if (isMounted.current && localUri !== videoUrl) {
+        if (isMounted.current && localUri !== videoUrl && localUri !== cachedUri) {
           setCachedUri(localUri);
           setIsCached(true);
         }
@@ -57,7 +98,7 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
     };
     
     checkCache();
-  }, [videoUrl]);
+  }, [videoUrl, player, cachedUri]);
 
   // Progress animation
   const progressAnim = useSharedValue(0);
@@ -66,50 +107,69 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
     isMounted.current = true;
     return () => {
       isMounted.current = false;
-      if (Platform.OS === 'android') {
-        setTimeout(() => {
-          if (videoRef.current) {
-            videoRef.current.unloadAsync().catch(() => {});
-          }
-        }, 0);
-      } else {
-        if (videoRef.current) {
-          videoRef.current.unloadAsync().catch(() => {});
-        }
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
       }
     };
   }, []);
 
   useEffect(() => {
-    if (status.durationMillis && status.positionMillis) {
-      const progress = status.positionMillis / status.durationMillis;
+    if (totalDuration > 0) {
+      const progress = currentTime / totalDuration;
       progressAnim.value = withTiming(progress, { duration: 250 });
     }
-  }, [status.positionMillis, status.durationMillis]);
+  }, [currentTime, totalDuration]);
 
   const progressStyle = useAnimatedStyle(() => ({
     width: `${progressAnim.value * 100}%`,
   }));
 
-  const handlePlayPause = useCallback(async () => {
-    if (!videoRef.current) return;
+  // Listen to player status changes
+  useEffect(() => {
+    const subscription = player.addListener('statusChange', (payload) => {
+      if (!isMounted.current) return;
+      
+      if (payload.status === 'readyToPlay') {
+        setTotalDuration(player.duration / 1000);
+        setIsLoading(false);
+      }
+    });
 
+    const timeSubscription = player.addListener('timeUpdate', (event) => {
+      if (!isMounted.current) return;
+      setCurrentTime(event.currentTime / 1000);
+    });
+
+    const playSubscription = player.addListener('playingChange', (event) => {
+      if (!isMounted.current) return;
+      setIsPlaying(event.isPlaying);
+    });
+
+    return () => {
+      subscription.remove();
+      timeSubscription.remove();
+      playSubscription.remove();
+    };
+  }, [player]);
+
+  const handlePlayPause = useCallback(async () => {
+    if (isReleased.current) return;
+    
     try {
-      if (status.isPlaying) {
-        await videoRef.current.pauseAsync();
+      if (isPlaying) {
+        player.pause();
       } else {
         setHasStarted(true);
-        await videoRef.current.playAsync();
+        player.play();
       }
     } catch (error: any) {
-      // Handle audio focus error gracefully (silent - happens during calls)
-      if (error?.message?.includes('AudioFocus')) {
-        // Audio focus not available (e.g., during phone call) - silently ignore
-      } else {
-        console.error('Video play/pause error:', error);
+      // Ignore released player errors
+      if (error?.message?.includes('released')) {
+        setIsPlaying(false);
+        isReleased.current = true;
       }
     }
-  }, [status.isPlaying]);
+  }, [isPlaying, player]);
 
   const handleDownload = useCallback(async () => {
     try {
@@ -124,68 +184,58 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
     }
   }, [videoUrl, cachedUri]);
 
-  const onPlaybackStatusUpdate = useCallback((newStatus: any) => {
-    if (isMounted.current) {
-      setStatus(newStatus);
-    }
-  }, []);
-
-  const onFullscreenStatusUpdate = useCallback((newStatus: any) => {
-    if (isMounted.current) {
-      setFullscreenStatus(newStatus);
-    }
-  }, []);
-
-  const handleFullscreenPlayPause = useCallback(async () => {
-    if (!fullscreenVideoRef.current) return;
-
-    try {
-      if (fullscreenStatus.isPlaying) {
-        await fullscreenVideoRef.current.pauseAsync();
-      } else {
-        await fullscreenVideoRef.current.playAsync();
-      }
-    } catch (error: any) {
-      // Handle audio focus error gracefully (silent - happens during calls)
-      if (error?.message?.includes('AudioFocus')) {
-        // Audio focus not available (e.g., during phone call) - silently ignore
-      } else {
-        console.error('Fullscreen video play/pause error:', error);
-      }
-    }
-  }, [fullscreenStatus.isPlaying]);
-
   const openFullscreen = useCallback(async () => {
+    if (isReleased.current) return;
+    
     setIsFullscreen(true);
     
-    // Set audio mode for fullscreen video
-    try {
-      const { Audio } = await import('expo-av');
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        staysActiveInBackground: true,
-        playsInSilentModeIOS: true,
-        shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: false,
-      });
-    } catch (error) {
-      console.log('Audio mode setup error:', error);
+    // Sync position with fullscreen player
+    if (hasStarted) {
+      try {
+        fullscreenPlayer.seekBy(player.currentTime - fullscreenPlayer.currentTime);
+        fullscreenPlayer.play();
+      } catch {
+        // Ignore errors from released players
+      }
+    } else {
+      setHasStarted(true);
+      player.play();
     }
-    
-    if (videoRef.current && fullscreenVideoRef.current && status.positionMillis) {
-      await fullscreenVideoRef.current.setPositionAsync(status.positionMillis);
-    }
-  }, [status.positionMillis]);
+  }, [hasStarted, player, fullscreenPlayer]);
 
   const closeFullscreen = useCallback(async () => {
-    if (videoRef.current && fullscreenVideoRef.current && fullscreenStatus.positionMillis) {
-      await videoRef.current.setPositionAsync(fullscreenStatus.positionMillis);
+    if (isReleased.current) return;
+    
+    // Sync position back to inline player
+    if (isFullscreen) {
+      try {
+        player.seekBy(fullscreenPlayer.currentTime - player.currentTime);
+        if (fullscreenPlayer.playing) {
+          player.play();
+        } else {
+          player.pause();
+        }
+      } catch {
+        // Ignore errors from released players
+      }
     }
     setIsFullscreen(false);
-  }, [fullscreenStatus.positionMillis]);
+    fullscreenPlayer.pause();
+  }, [isFullscreen, player, fullscreenPlayer]);
 
-  const currentTime = status.positionMillis ? status.positionMillis / 1000 : 0;
-  const totalDuration = status.durationMillis ? status.durationMillis / 1000 : (initialDuration || 0);
+  // Fullscreen player listeners
+  useEffect(() => {
+    if (!isFullscreen) return;
+
+    const subscription = fullscreenPlayer.addListener('statusChange', (status) => {
+      if (!isMounted.current) return;
+      // Handle fullscreen status changes if needed
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [isFullscreen, fullscreenPlayer]);
 
   return (
     <View style={{
@@ -253,19 +303,14 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
             </View>
           </View>
         ) : (
-          <Video
-            ref={videoRef}
-            source={{ uri: cachedUri }}
+          <VideoView
+            player={player}
             style={{
               width: '100%',
               height: '100%',
             }}
-            resizeMode={ResizeMode.COVER}
-            isLooping={false}
-            onPlaybackStatusUpdate={onPlaybackStatusUpdate}
-            onLoadStart={() => setIsLoading(true)}
-            onLoad={() => setIsLoading(false)}
-            shouldPlay={true}
+            contentFit="cover"
+            nativeControls={false}
           />
         )}
 
@@ -363,7 +408,7 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
             marginRight: s(10),
           }}
         >
-          {status.isPlaying ? (
+          {isPlaying ? (
             <Pause size={s(18)} color={isMe ? '#fff' : theme.primary} />
           ) : (
             <Play size={s(18)} color={isMe ? '#fff' : theme.primary} style={{ marginLeft: s(2) }} />
@@ -471,89 +516,15 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
             justifyContent: 'center',
             alignItems: 'center',
           }}>
-            <Video
-              ref={fullscreenVideoRef}
-              source={{ uri: cachedUri }}
+            <VideoView
+              player={fullscreenPlayer}
               style={{
                 width: '100%',
                 height: '100%',
               }}
-              resizeMode={ResizeMode.CONTAIN}
-              isLooping={false}
-              onPlaybackStatusUpdate={onFullscreenStatusUpdate}
-              shouldPlay={true}
+              contentFit="contain"
+              nativeControls={true}
             />
-
-            {/* Play/Pause Overlay for Fullscreen */}
-            {!fullscreenStatus.isPlaying && (
-              <TouchableOpacity
-                onPress={handleFullscreenPlayPause}
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                  backgroundColor: 'rgba(0,0,0,0.3)',
-                }}
-              >
-                <View style={{
-                  width: s(72),
-                  height: s(72),
-                  borderRadius: s(36),
-                  backgroundColor: 'rgba(255,255,255,0.9)',
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                }}>
-                  <Play size={s(36)} color="#000" style={{ marginLeft: s(4) }} />
-                </View>
-              </TouchableOpacity>
-            )}
-          </View>
-
-          {/* Fullscreen Controls */}
-          <View style={{
-            position: 'absolute',
-            bottom: s(60),
-            left: s(20),
-            right: s(20),
-            flexDirection: 'row',
-            alignItems: 'center',
-            backgroundColor: 'rgba(0,0,0,0.5)',
-            borderRadius: s(12),
-            paddingHorizontal: s(16),
-            paddingVertical: s(12),
-          }}>
-            <TouchableOpacity
-              onPress={handleFullscreenPlayPause}
-              style={{
-                width: s(44),
-                height: s(44),
-                borderRadius: s(22),
-                backgroundColor: 'rgba(255,255,255,0.2)',
-                justifyContent: 'center',
-                alignItems: 'center',
-                marginRight: s(16),
-              }}
-            >
-              {fullscreenStatus.isPlaying ? (
-                <Pause size={s(22)} color="#fff" />
-              ) : (
-                <Play size={s(22)} color="#fff" style={{ marginLeft: s(2) }} />
-              )}
-            </TouchableOpacity>
-
-            <View style={{ flex: 1 }}>
-              <Text style={{
-                color: '#fff',
-                fontSize: s(14),
-                fontWeight: '500',
-              }}>
-                {formatTime((fullscreenStatus.positionMillis || 0) / 1000)} / {formatTime((fullscreenStatus.durationMillis || totalDuration * 1000) / 1000)}
-              </Text>
-            </View>
           </View>
 
           {/* Hint text */}

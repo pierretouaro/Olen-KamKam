@@ -61,6 +61,13 @@ import {
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
+// FEATURE FLAGS - Set to false to disable features for performance testing
+const FEATURES = {
+  VOICE_MESSAGES: true,     // Voice recording
+  MEDIA_SHARING: true,      // Photos, videos, files
+  HAPTIC_VIBES: false,      // Send vibes/haptic reactions
+} as const;
+
 interface Message {
   id: string;
   text: string;
@@ -83,34 +90,78 @@ interface Message {
   duration?: number;
 }
 
-// Memoized message bubble component
-const MessageBubble = memo(({ 
+// Avatar component at module level - renders user avatar with theme primary color
+const Avatar = memo(({
+  otherUserAvatar,
+  otherUserName,
+  scale,
+  primaryColor
+}: {
+  otherUserAvatar?: string;
+  otherUserName?: string;
+  scale: number;
+  primaryColor: string;
+}) => {
+  const s = (size: number) => size * scale;
+  
+  if (otherUserAvatar) {
+    return (
+      <Image
+        source={{ uri: otherUserAvatar }}
+        style={{
+          width: s(32),
+          height: s(32),
+          borderRadius: s(16),
+          marginRight: s(4),
+        }}
+        resizeMode="cover"
+      />
+    );
+  }
+  
+  return (
+    <View style={{
+      width: s(32),
+      height: s(32),
+      borderRadius: s(16),
+      backgroundColor: primaryColor,
+      justifyContent: 'center',
+      alignItems: 'center',
+      marginRight: s(4),
+    }}>
+      <Text style={{ color: '#fff', fontSize: s(14), fontWeight: '700' }}>
+        {otherUserName?.[0]?.toUpperCase() || '?'}
+      </Text>
+    </View>
+  );
+});
+
+Avatar.displayName = 'Avatar';
+
+// Memoized message bubble component - NO ANIMATIONS for performance
+// Now renders avatar internally so it updates when otherUserName/otherUserAvatar change
+const MessageBubble = memo(({
   item, 
   isMe, 
   showAvatar,
-  avatar,
+  otherUserName,
+  otherUserAvatar,
   isDark,
   theme,
   scale 
 }: any) => {
-  const scaleAnim = useSharedValue(0.95);
-  const opacityAnim = useSharedValue(0);
-
-  useEffect(() => {
-    scaleAnim.value = withSpring(1, { damping: 15, stiffness: 150 });
-    opacityAnim.value = withSpring(1, { damping: 20 });
-  }, []);
-
-  const animatedStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: scaleAnim.value }],
-    opacity: opacityAnim.value,
-  }));
-
   const s = (size: number) => size * scale;
 
   return (
-    <Reanimated.View style={[{ flexDirection: isMe ? 'row-reverse' : 'row', alignItems: 'flex-end' }, animatedStyle]}>
-      {!isMe && showAvatar && avatar}
+    <View style={{ flexDirection: isMe ? 'row-reverse' : 'row', alignItems: 'flex-end' }}>
+      {!isMe && showAvatar && (
+        <Avatar
+          otherUserAvatar={otherUserAvatar}
+          otherUserName={otherUserName}
+          scale={scale}
+          primaryColor={theme.primary}
+        />
+      )}
       {!isMe && !showAvatar && <View style={{ width: s(36) }} />}
       
       <View style={{
@@ -121,13 +172,14 @@ const MessageBubble = memo(({
         paddingVertical: s(10),
         marginHorizontal: s(8),
       }}>
-        <View style={{ flexDirection: 'row', alignItems: 'flex-end' }}>
+        <View style={{ flexDirection: 'row', alignItems: 'flex-end', flexWrap: 'wrap' }}>
           <Text style={{
             color: isMe ? '#fff' : theme.text,
             fontSize: s(16),
             lineHeight: s(22),
             fontWeight: '400',
             marginRight: s(4),
+            flexShrink: 1,
           }}>
             {item.text}
           </Text>
@@ -136,12 +188,14 @@ const MessageBubble = memo(({
             color: isMe ? 'rgba(255,255,255,0.7)' : theme.textMuted,
             fontSize: s(11),
             fontWeight: '500',
+            marginLeft: 'auto',
+            paddingLeft: s(4),
           }}>
             {item.time}
           </Text>
         </View>
       </View>
-    </Reanimated.View>
+    </View>
   );
 });
 
@@ -269,12 +323,12 @@ export default function ChatScreen() {
     loadMore,
   } = useRealtimeMessages(id as string, user?.id);
   const [messages, setMessages] = useState<Message[]>([]);
-  const messagesRef = useRef<Message[]>([]);
   const [showHapticPicker, setShowHapticPicker] = useState(false);
   const { sendHapticReaction } = useHapticReactions();
   
   const [isRecording, setIsRecording] = useState(false);
   const [recordingStartX, setRecordingStartX] = useState(0);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [hasRecordingPermission, setHasRecordingPermission] = useState<boolean | null>(null);
   
   // Media upload states
@@ -283,7 +337,25 @@ export default function ChatScreen() {
   
   const flashListRef = useRef<FlashListRef<Message>>(null);
   const inputRef = useRef<TextInput>(null);
-
+  
+  // CRITICAL: Use refs to prevent renderMessage recreation
+  const messagesRef = useRef<Message[]>([]);
+  const conversationDetailsRef = useRef<any>(null);
+  const themeRef = useRef<any>(null);
+  
+  // Keep refs synced without causing re-renders
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+  
+  useEffect(() => {
+    conversationDetailsRef.current = conversationDetails;
+  }, [conversationDetails]);
+  
+  useEffect(() => {
+    themeRef.current = { theme, isDark, scale };
+  }, [theme, isDark, scale]);
+  
   // File size limits
   const MAX_FILE_SIZE = 15 * 1024 * 1024; // 15MB
   const MAX_VIDEO_DURATION = 60; // 60 seconds
@@ -443,26 +515,46 @@ export default function ChatScreen() {
   }, []);
 
   const checkMicrophonePermission = async () => {
-    const { Audio } = await import('expo-av');
-    const { status } = await Audio.getPermissionsAsync();
+    const { getRecordingPermissionsAsync } = await import('expo-audio');
+    const { status } = await getRecordingPermissionsAsync();
     setHasRecordingPermission(status === 'granted');
   };
 
-  // Keyboard listeners
+  // Keyboard listeners - track height for Android padding fix
   useEffect(() => {
-    const showSubscription = Keyboard.addListener('keyboardDidShow', () => {
-      setTimeout(() => flashListRef.current?.scrollToEnd({ animated: true }), 100);
+    const showSubscription = Keyboard.addListener('keyboardDidShow', (e) => {
+      console.log('DEBUG: Keyboard shown');
+      setKeyboardHeight(e.endCoordinates.height);
+      // Scroll to bottom when keyboard opens
+      setTimeout(() => scrollToBottom(), 150);
+    });
+    const hideSubscription = Keyboard.addListener('keyboardDidHide', () => {
+      setKeyboardHeight(0);
     });
 
     return () => {
       showSubscription.remove();
+      hideSubscription.remove();
     };
   }, []);
 
   // Sync messages - only when supabaseMessages changes
   useEffect(() => {
+    console.log('DEBUG: Chat screen - supabaseMessages changed, count:', supabaseMessages.length);
     if (supabaseMessages.length > 0 || loading === false) {
-      const transformed: Message[] = supabaseMessages.map((msg: any) => ({
+      // Sort messages by created_at (oldest first, newest last)
+      const sorted = [...supabaseMessages].sort((a: any, b: any) => 
+        new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      );
+      
+      // Check for duplicates
+      const ids = sorted.map(m => m.id);
+      const uniqueIds = new Set(ids);
+      if (ids.length !== uniqueIds.size) {
+        console.log('DEBUG: DUPLICATE IDs FOUND in supabaseMessages:', ids.length - uniqueIds.size, 'duplicates');
+      }
+      
+      const transformed: Message[] = sorted.map((msg: any) => ({
         id: msg.id,
         text: msg.content,
         sender: msg.sender_id === user?.id ? 'me' : 'them',
@@ -474,19 +566,20 @@ export default function ChatScreen() {
         audio_url: msg.metadata?.audio_url,
         duration: msg.metadata?.duration,
       }));
+      console.log('DEBUG: Chat screen - setting messages, count:', transformed.length);
       setMessages(transformed);
       messagesRef.current = transformed;
       
-      // Scroll to bottom when messages load initially
-      if (supabaseMessages.length > 0 && loading) {
-        setTimeout(() => {
-          flashListRef.current?.scrollToEnd({ animated: false });
-        }, 100);
+      // Scroll to bottom on initial load (after a short delay to ensure layout)
+      console.log('DEBUG: Messages loaded, loading:', loading, 'count:', transformed.length);
+      if (loading && transformed.length > 0) {
+        console.log('DEBUG: Scheduling scroll to bottom');
+        setTimeout(() => scrollToBottom(false), 300);
       }
       
       // Preload media in background for better performance
       const mediaUrls: Array<{ url: string; type: 'image' | 'video' | 'voice' }> = [];
-      supabaseMessages.forEach((msg: any) => {
+      sorted.forEach((msg: any) => {
         if (msg.type === 'image' && msg.metadata?.image_url) {
           mediaUrls.push({ url: msg.metadata.image_url, type: 'image' });
         } else if (msg.type === 'video' && msg.metadata?.video_url) {
@@ -503,6 +596,17 @@ export default function ChatScreen() {
       }
     }
   }, [supabaseMessages, user?.id, loading]);
+
+  // Scroll to bottom of chat - uses ref to avoid stale closure issues
+  const scrollToBottom = useCallback((animated = true) => {
+    // Use ref to check messages count to avoid stale closure
+    const msgCount = messagesRef.current?.length || 0;
+    console.log('DEBUG: scrollToBottom called, ref exists:', !!flashListRef.current, 'messages:', msgCount);
+    if (flashListRef.current && msgCount > 0) {
+      console.log('DEBUG: Scrolling to end');
+      flashListRef.current.scrollToEnd({ animated });
+    }
+  }, []);
 
   // Fetch conversation details
   useEffect(() => {
@@ -537,6 +641,14 @@ export default function ChatScreen() {
     return () => clearTimeout(timeout);
   }, [inputText, id]);
 
+  // Scroll to bottom when messages first load (from empty to having messages)
+  useEffect(() => {
+    if (messages.length > 0) {
+      console.log('DEBUG: Messages effect triggered, scrolling to bottom');
+      setTimeout(() => scrollToBottom(false), 300);
+    }
+  }, [messages.length, scrollToBottom]);
+
   const sendMessage = async () => {
     if (!inputText.trim()) return;
     
@@ -544,8 +656,6 @@ export default function ChatScreen() {
     await sendMessageToSupabase(inputText.trim(), 'text');
     setInputText('');
     clearDraft(id as string);
-    
-    setTimeout(() => flashListRef.current?.scrollToEnd({ animated: true }), 100);
   };
 
   // Upload voice message to Supabase
@@ -609,8 +719,6 @@ export default function ChatScreen() {
     }
 
     await sendMessageToSupabase('', 'voice', { audio_url: audioUrl, duration });
-    
-    setTimeout(() => flashListRef.current?.scrollToEnd({ animated: true }), 100);
   };
 
   // Voice recording handlers
@@ -666,39 +774,6 @@ export default function ChatScreen() {
     return date.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
   }, []);
 
-  const renderAvatar = useCallback((isLastInGroup: boolean) => {
-    if (!isLastInGroup) return null;
-    
-    return (
-      <View style={{
-        width: s(32),
-        height: s(32),
-        borderRadius: s(16),
-        backgroundColor: theme.primary,
-        overflow: 'hidden',
-        marginRight: s(4),
-      }}>
-        {conversationDetails?.other_user_avatar ? (
-          <Image
-            source={{ uri: conversationDetails.other_user_avatar }}
-            style={{ width: '100%', height: '100%' }}
-            resizeMode="cover"
-          />
-        ) : (
-          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-            <Text style={{ 
-              color: '#fff', 
-              fontSize: s(14), 
-              fontWeight: '700',
-            }}>
-              {conversationDetails?.other_user_name?.[0]?.toUpperCase() || '?'}
-            </Text>
-          </View>
-        )}
-      </View>
-    );
-  }, [conversationDetails, theme, s]);
-
   // Memoized message type check to avoid parsing on every render
   const getMessageType = useCallback((item: Message): { 
     isVoice: boolean; 
@@ -744,68 +819,70 @@ export default function ChatScreen() {
     };
   }, []);
 
-  // Memoized renderItem for FlashList
+  // CRITICAL FIX: Use refs for all dynamic values to prevent renderMessage recreation
   const renderMessage = useCallback(({ item, index }: { item: Message; index: number }) => {
     const isMe = item.sender === 'me';
-    // Use item directly from data prop, not from closure
-    const previousMessage = index > 0 ? messages[index - 1] : null;
-    const nextMessage = index < messages.length - 1 ? messages[index + 1] : null;
+    // Use refs to access current values without dependencies
+    const msgs = messagesRef.current;
+    const { theme, isDark, scale } = themeRef.current || {};
+    const details = conversationDetailsRef.current;
+    const sz = (size: number) => size * (scale || 1);
+    
+    const previousMessage = index > 0 ? msgs[index - 1] : null;
+    const nextMessage = index < msgs.length - 1 ? msgs[index + 1] : null;
     const showTimestamp = shouldShowTimestamp(item, previousMessage);
     const isLastInGroup = !nextMessage || nextMessage.sender !== item.sender;
     
     const { isVoice, isHaptic, isImage, isVideo, isFile, hapticPattern } = getMessageType(item);
 
     return (
-      <View style={{ marginBottom: isLastInGroup ? s(12) : s(2) }}>
+      <View style={{ marginBottom: isLastInGroup ? sz(12) : sz(2) }}>
         {showTimestamp && (
-          <Reanimated.View 
-            entering={FadeIn.duration(300)}
-            style={{ alignItems: 'center', marginVertical: s(20) }}
-          >
+          <View style={{ alignItems: 'center', marginVertical: sz(20) }}>
             <View style={{
               backgroundColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)',
-              paddingHorizontal: s(16),
-              paddingVertical: s(8),
-              borderRadius: s(20),
+              paddingHorizontal: sz(16),
+              paddingVertical: sz(8),
+              borderRadius: sz(20),
             }}>
               <Text style={{
-                color: theme.textMuted,
-                fontSize: s(12),
+                color: theme?.textMuted || '#888',
+                fontSize: sz(12),
                 fontWeight: '600',
               }}>
                 {formatTimestamp(item.created_at)}
               </Text>
             </View>
-          </Reanimated.View>
+          </View>
         )}
         
         <View style={{
           flexDirection: 'row',
           justifyContent: isMe ? 'flex-end' : 'flex-start',
-          paddingHorizontal: s(12),
+          paddingHorizontal: sz(12),
           alignItems: 'flex-end',
         }}>
-          {isVoice ? (
+          {isVoice && FEATURES.VOICE_MESSAGES ? (
             <VoiceMessage
               audioUrl={item.audio_url || item.metadata?.audio_url || ''}
               duration={item.duration || item.metadata?.duration}
               isMe={isMe}
               time={item.time}
             />
-          ) : isImage ? (
+          ) : isImage && FEATURES.MEDIA_SHARING ? (
             <ImageMessage
               imageUrl={item.metadata?.image_url || ''}
               isMe={isMe}
               time={item.time}
             />
-          ) : isVideo ? (
+          ) : isVideo && FEATURES.MEDIA_SHARING ? (
             <VideoMessage
               videoUrl={item.metadata?.video_url || ''}
               duration={item.metadata?.duration}
               isMe={isMe}
               time={item.time}
             />
-          ) : isFile ? (
+          ) : isFile && FEATURES.MEDIA_SHARING ? (
             <FileMessage
               fileUrl={item.metadata?.file_url || ''}
               fileName={item.metadata?.file_name || 'File'}
@@ -813,7 +890,7 @@ export default function ChatScreen() {
               isMe={isMe}
               time={item.time}
             />
-          ) : isHaptic && hapticPattern ? (
+          ) : isHaptic && hapticPattern && FEATURES.HAPTIC_VIBES ? (
             <HapticMessage
               pattern={hapticPattern}
               isMe={isMe}
@@ -821,12 +898,25 @@ export default function ChatScreen() {
               isLastInGroup={isLastInGroup}
               shouldPlay={!isMe}
             />
+          ) : (isVoice || isImage || isVideo || isFile || isHaptic) ? (
+            // Fallback text for disabled features
+            <MessageBubble
+              item={{ ...item, text: isVoice ? '🔊 Voice message' : isImage ? '📷 Image' : isVideo ? '🎥 Video' : isFile ? '📎 File' : '✨ Vibe' }}
+              isMe={isMe}
+              showAvatar={!isMe && isLastInGroup}
+              otherUserName={details?.other_user_name}
+              otherUserAvatar={details?.other_user_avatar}
+              isDark={isDark}
+              theme={theme}
+              scale={scale}
+            />
           ) : (
             <MessageBubble
               item={item}
               isMe={isMe}
               showAvatar={!isMe && isLastInGroup}
-              avatar={renderAvatar(isLastInGroup)}
+              otherUserName={details?.other_user_name}
+              otherUserAvatar={details?.other_user_avatar}
               isDark={isDark}
               theme={theme}
               scale={scale}
@@ -835,7 +925,8 @@ export default function ChatScreen() {
         </View>
       </View>
     );
-  }, [messages, shouldShowTimestamp, formatTimestamp, getMessageType, renderAvatar, isDark, theme, scale, s]);
+  // CRITICAL: Empty deps - renderMessage never recreates
+  }, []);
 
   // Memoized keyExtractor
   const keyExtractor = useCallback((item: Message) => item.id, []);
@@ -994,40 +1085,32 @@ export default function ChatScreen() {
 
       <KeyboardAvoidingView 
         style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={0}
       >
+        {/* FlashList - uses native RecyclerView for performance */}
         <FlashList
           ref={flashListRef}
           data={messages}
           renderItem={renderMessage}
-          keyExtractor={keyExtractor}
-          contentContainerStyle={{ 
-            paddingTop: s(14),
-            paddingBottom: s(16),
-          }}
+          keyExtractor={(item: Message) => item.id}
+          {...{estimatedItemSize:120}}
+          contentContainerStyle={{ paddingTop: s(14), paddingBottom: s(16) }}
           showsVerticalScrollIndicator={false}
-          onContentSizeChange={() => {
-            if (messages.length > 0 && !loadingMore && loading) {
-              flashListRef.current?.scrollToEnd({ animated: false });
-            }
-          }}
-          onEndReached={() => {
-            if (hasMore && !loadingMore) {
-              loadMore();
-            }
-          }}
-          onEndReachedThreshold={0.3}
-          ListFooterComponent={loadingMore ? (
-            <ActivityIndicator style={{ margin: 20 }} color={theme.primary} />
-          ) : null}
+          onEndReached={loadMore}
+          onEndReachedThreshold={0.5}
+          ListFooterComponent={loadingMore ? <ActivityIndicator style={{ margin: 20 }} color={theme.primary} /> : null}
+          // Disable extraData to prevent re-renders
+          extraData={undefined}
+          // Inverted for chat (newest at bottom)
+          {...{inverted:false}}
         />
 
-        {/* Modern Input Bar */}
+        {/* Modern Input Bar - narrower with send button outside */}
         <View style={{
-          paddingBottom: Platform.OS === 'ios' ? insets.bottom + s(4) : s(12),
-          paddingTop: s(6),
-          paddingHorizontal: s(10),
+          paddingBottom: Platform.OS === 'ios' ? insets.bottom + s(4) : s(8),
+          paddingTop: s(8),
+          paddingHorizontal: s(12),
           backgroundColor: theme.background,
           borderTopWidth: 0.5,
           borderTopColor: theme.border,
@@ -1035,108 +1118,115 @@ export default function ChatScreen() {
           <View style={{ 
             flexDirection: 'row', 
             alignItems: 'center',
-            backgroundColor: theme.surface,
-            borderRadius: s(24),
-            paddingHorizontal: s(4),
-            paddingVertical: s(4),
-            borderWidth: 1,
-            borderColor: theme.border,
           }}>
-            <TouchableOpacity
-              onPress={() => setShowMediaPicker(true)}
-              style={{
-                width: s(38),
-                height: s(38),
-                borderRadius: s(19),
-                backgroundColor: theme.surfaceHighlight,
-                justifyContent: 'center',
-                alignItems: 'center',
-                marginRight: s(4),
-              }}
-            >
-              <Plus size={s(22)} color={theme.text} />
-            </TouchableOpacity>
-
-            <TextInput
-              ref={inputRef}
-              style={{
-                flex: 1,
-                color: theme.text,
-                fontSize: s(15),
-                maxHeight: s(90),
-                paddingVertical: s(8),
-                paddingHorizontal: s(6),
-              }}
-              value={inputText}
-              onChangeText={setInputText}
-              placeholder="Type a message..."
-              placeholderTextColor={theme.textMuted}
-              multiline
-              maxLength={2000}
-            />
-
-            {!inputText.trim() ? (
+            {/* Media button - separate bubble on left, same color as chat bubbles */}
+            {FEATURES.MEDIA_SHARING && (
               <TouchableOpacity
-                onPress={() => setShowHapticPicker(true)}
+                onPress={() => setShowMediaPicker(true)}
                 style={{
-                  width: s(38),
-                  height: s(38),
-                  borderRadius: s(19),
-                  backgroundColor: `${theme.primary}15`,
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                  marginRight: s(4),
-                }}
-              >
-                <Zap size={s(20)} color={theme.primary} />
-              </TouchableOpacity>
-            ) : null}
-
-            {inputText.trim() ? (
-              <TouchableOpacity
-                onPress={sendMessage}
-                style={{
-                  width: s(38),
-                  height: s(38),
-                  borderRadius: s(19),
+                  width: s(44),
+                  height: s(44),
+                  borderRadius: s(22),
                   backgroundColor: theme.primary,
                   justifyContent: 'center',
                   alignItems: 'center',
+                  marginRight: s(8),
                 }}
               >
-                <Send size={s(20)} color="#fff" />
+                <Plus size={s(22)} color="#fff" />
               </TouchableOpacity>
-            ) : (
-              <View
-                onTouchStart={handleMicPressIn}
-                onTouchEnd={handleMicPressOut}
-                style={{
-                  width: s(38),
-                  height: s(38),
-                  borderRadius: s(19),
-                  backgroundColor: isRecording ? '#EF4444' : 'transparent',
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                }}
-              >
-                <Mic size={s(22)} color={isRecording ? '#fff' : theme.textMuted} />
-              </View>
             )}
+
+            {/* Input container - full pill shape */}
+            <View style={{
+              flex: 1,
+              flexDirection: 'row',
+              alignItems: 'center',
+              backgroundColor: theme.surface,
+              borderRadius: s(28),
+              paddingHorizontal: s(12),
+              paddingVertical: s(4),
+              borderWidth: 1,
+              borderColor: theme.border,
+              marginRight: s(8),
+            }}>
+              <TextInput
+                ref={inputRef}
+                style={{
+                  flex: 1,
+                  color: theme.text,
+                  fontSize: s(15),
+                  maxHeight: s(90),
+                  paddingVertical: s(8),
+                  paddingHorizontal: s(6),
+                }}
+                value={inputText}
+                onChangeText={setInputText}
+                placeholder="Message"
+                placeholderTextColor={theme.textMuted}
+                multiline
+                maxLength={2000}
+              />
+
+              {/* Voice recorder button - inside message bar, right side */}
+              {FEATURES.VOICE_MESSAGES && !inputText.trim() && (
+                <View
+                  onTouchStart={handleMicPressIn}
+                  onTouchEnd={handleMicPressOut}
+                  style={{
+                    width: s(38),
+                    height: s(38),
+                    borderRadius: s(19),
+                    backgroundColor: isRecording ? '#EF4444' : theme.surfaceHighlight,
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    marginLeft: s(4),
+                  }}
+                >
+                  <Mic size={s(20)} color={isRecording ? '#fff' : theme.textMuted} />
+                </View>
+              )}
+            </View>
+
+            {/* Send button - separate bubble outside input */}
+            <TouchableOpacity
+              onPress={inputText.trim() ? sendMessage : undefined}
+              disabled={!inputText.trim()}
+              style={{
+                width: s(44),
+                height: s(44),
+                borderRadius: s(22),
+                backgroundColor: inputText.trim() ? theme.primary : theme.surfaceHighlight,
+                justifyContent: 'center',
+                alignItems: 'center',
+                opacity: inputText.trim() ? 1 : 0.5,
+              }}
+            >
+              <Send size={s(22)} color={inputText.trim() ? '#fff' : theme.textMuted} />
+            </TouchableOpacity>
           </View>
         </View>
+        
+        {/* Android keyboard spacer - pushes content up when keyboard opens */}
+        {Platform.OS === 'android' && keyboardHeight > 0 && (
+          <View style={{ height: keyboardHeight }} />
+        )}
       </KeyboardAvoidingView>
 
-      <HapticReactionPicker
-        visible={showHapticPicker}
-        onClose={() => setShowHapticPicker(false)}
-        onSelect={async (pattern) => {
-          if (user?.id) {
-            await sendHapticReaction(id as string, pattern, supabase, user.id);
-          }
-        }}
-      />
+      {FEATURES.HAPTIC_VIBES && (
+        <HapticReactionPicker
+          visible={showHapticPicker}
+          onClose={() => setShowHapticPicker(false)}
+          onSelect={async (pattern) => {
+            if (user?.id) {
+              await sendHapticReaction(id as string, pattern, supabase, user.id);
+            }
+          }}
+        />
+      )}
 
       {/* Media Picker Modal */}
+      {FEATURES.MEDIA_SHARING && (
       <Modal
         visible={showMediaPicker}
         transparent={true}
@@ -1433,6 +1523,7 @@ export default function ChatScreen() {
           </View>
         </View>
       </Modal>
+      )}
     </View>
   );
 }
