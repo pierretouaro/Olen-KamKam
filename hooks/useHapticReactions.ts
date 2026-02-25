@@ -2,6 +2,11 @@ import { useCallback } from 'react';
 import { Platform } from 'react-native';
 import * as Haptics from 'expo-haptics';
 
+// Utility function for delays - defined at top to avoid ReferenceError
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 export type HapticPattern = 'heartbeat' | 'rapid' | 'pulse' | 'wave' | 'sharp' | 'gentle';
 
 interface HapticPatternConfig {
@@ -147,7 +152,3 @@ export const useHapticReactions = () => {
     patterns: HAPTIC_PATTERNS,
   };
 };
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}

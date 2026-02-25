@@ -238,11 +238,18 @@ export const useRealtimeMessages = (conversationId: string | null, userId?: stri
         return null;
       }
 
-      // Handle both array and object responses from RPC
-      const messageData = Array.isArray(data) ? data[0] : data;
-      const realId = messageData?.id;
+      // Handle RPC response - can be string (UUID), array, or object
+      let realId: string | null = null;
+      if (typeof data === 'string') {
+        // Response is a plain UUID string
+        realId = data;
+      } else if (Array.isArray(data) && data[0]?.id) {
+        realId = data[0].id;
+      } else if (data?.id) {
+        realId = data.id;
+      }
       
-      console.log('DEBUG: Extracted realId:', realId, 'messageData:', messageData);
+      console.log('DEBUG: Extracted realId:', realId, 'raw data:', data);
       
       if (realId) {
         await messageDb.updateMessageId(tempId, realId);
@@ -264,11 +271,11 @@ export const useRealtimeMessages = (conversationId: string | null, userId?: stri
         
         // Remove from tracking after 2 seconds (subscription should have fired by then)
         setTimeout(() => {
-          recentlySentIds.current.delete(realId);
+          recentlySentIds.current.delete(realId!);
         }, 2000);
       }
 
-      return messageData;
+      return realId ? { id: realId } : null;
     } catch (err) {
       console.error('Error sending message:', err);
       return null;

@@ -32,14 +32,35 @@ import {
 } from 'lucide-react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
+import { VideoView, useVideoPlayer } from 'expo-video';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-const STORY_DURATION = 10000; // 10 seconds per story
+const DEFAULT_STORY_DURATION = 10000; // 10 seconds default for images
+
+// Video player component for stories
+function StoryVideoPlayer({ uri }: { uri: string }) {
+  const player = useVideoPlayer(uri, (player) => {
+    player.loop = false;
+    player.play();
+  });
+
+  return (
+    <View style={{ width: SCREEN_WIDTH, height: SCREEN_HEIGHT * 0.8 }}>
+      <VideoView
+        style={{ width: '100%', height: '100%' }}
+        player={player}
+        contentFit="contain"
+      />
+    </View>
+  );
+}
 
 interface Story {
   id: string;
   user_id: string;
-  image_url: string;
+  image_url?: string;
+  video_url?: string;
+  metadata?: { isVideo?: boolean; duration?: number };
   created_at: string;
   expires_at: string;
   profile?: {
@@ -84,7 +105,7 @@ export default function StoriesBar() {
   const [showReactionsList, setShowReactionsList] = useState(false);
   
   const progressAnim = useRef(new Animated.Value(0)).current;
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [pressedEmoji, setPressedEmoji] = useState<string | null>(null);
 
   const QUICK_REACTIONS = [
@@ -225,19 +246,38 @@ export default function StoriesBar() {
   }, [selectedStory?.id, fetchReactions]);
 
   // Track remaining time for pause/resume
-  const [remainingTime, setRemainingTime] = useState(STORY_DURATION);
+  const [remainingTime, setRemainingTime] = useState(DEFAULT_STORY_DURATION);
+  
+  // Update remaining time when story changes
+  useEffect(() => {
+    if (selectedStory) {
+      setRemainingTime(getStoryDuration(selectedStory));
+    }
+  }, [selectedStory?.id, getStoryDuration]);
   const [isPaused, setIsPaused] = useState(false);
+
+  // Get story duration - videos use their actual length, images use default
+  const getStoryDuration = useCallback((story: Story): number => {
+    if (story.metadata?.isVideo && story.metadata?.duration) {
+      // Convert seconds to milliseconds (max 60 seconds)
+      return Math.min(story.metadata.duration, 60) * 1000;
+    }
+    return DEFAULT_STORY_DURATION;
+  }, []);
 
   // Auto-advance story timer
   useEffect(() => {
     if (selectedStory && currentUserStories.length > 0 && !isPaused) {
+      // Get duration for current story (video length or default)
+      const storyDuration = getStoryDuration(selectedStory);
+      
       // Always reset animation when story changes
       progressAnim.setValue(0);
       setProgress(0);
       
       Animated.timing(progressAnim, {
         toValue: 1,
-        duration: STORY_DURATION,
+        duration: storyDuration,
         useNativeDriver: false,
       }).start(({ finished }) => {
         if (finished && !isPaused) {
@@ -252,7 +292,7 @@ export default function StoriesBar() {
             clearInterval(progressInterval);
             return 1;
           }
-          return prev + (100 / (STORY_DURATION / 100));
+          return prev + (100 / (storyDuration / 100));
         });
       }, 100);
 
@@ -271,23 +311,39 @@ export default function StoriesBar() {
     }
 
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ImagePicker.MediaTypeOptions.All,
       allowsEditing: false,
       allowsMultipleSelection: true,
       selectionLimit: 10,
       quality: 0.9,
+      videoMaxDuration: 60,
     });
 
-    console.log('Image picker result:', result.canceled ? 'canceled' : `${result.assets?.length} images selected`);
+    console.log('Media picker result:', result.canceled ? 'canceled' : `${result.assets?.length} items selected`);
 
     if (!result.canceled && result.assets && result.assets.length > 0) {
-      console.log('Selected assets:', result.assets.map(a => a.uri.substring(0, 50)));
+      console.log('Selected assets:', result.assets.map(a => ({ uri: a.uri.substring(0, 50), type: a.type, duration: a.duration })));
       setLoading(true);
       try {
-        // Upload all selected images sequentially
+        // Upload all selected items sequentially
         for (let i = 0; i < result.assets.length; i++) {
-          console.log(`Uploading image ${i + 1}/${result.assets.length}`);
-          await uploadStory(result.assets[i].uri, true);
+          const asset = result.assets[i];
+          const isVideo = asset.type === 'video' || (asset.duration && asset.duration > 0);
+          
+          // Duration can be in milliseconds (iOS) or seconds (Android)
+          // If duration > 1000, it's likely in milliseconds
+          let durationInSeconds = asset.duration || 0;
+          if (durationInSeconds > 1000) {
+            durationInSeconds = durationInSeconds / 1000;
+          }
+          
+          if (isVideo && durationInSeconds > 60) {
+            Alert.alert('Video too long', `Video ${i + 1} is ${Math.round(durationInSeconds)} seconds. Please select a video under 60 seconds.`);
+            continue;
+          }
+          
+          console.log(`Uploading ${isVideo ? 'video' : 'image'} ${i + 1}/${result.assets.length}, duration: ${durationInSeconds}s`);
+          await uploadStory(asset.uri, isVideo, Math.round(durationInSeconds), true);
         }
         // Refresh stories after all uploads complete
         await fetchStories();
@@ -297,12 +353,12 @@ export default function StoriesBar() {
     }
   };
 
-  const uploadStory = async (uri: string, isBatch: boolean = false) => {
+  const uploadStory = async (uri: string, isVideo: boolean = false, duration: number = 0, isBatch: boolean = false) => {
     if (!session?.user) return;
     
     if (!isBatch) setLoading(true);
     try {
-      const fileExt = 'jpg';
+      const fileExt = isVideo ? 'mp4' : 'jpg';
       const fileName = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}.${fileExt}`;
       const filePath = `${session.user.id}/${fileName}`;
 
@@ -321,7 +377,7 @@ export default function StoriesBar() {
       const { error: uploadError } = await supabase.storage
         .from('stories')
         .upload(filePath, bytes, {
-          contentType: 'image/jpeg',
+          contentType: isVideo ? 'video/mp4' : 'image/jpeg',
           cacheControl: '3600',
         });
 
@@ -334,11 +390,17 @@ export default function StoriesBar() {
       const expiresAt = new Date();
       expiresAt.setHours(expiresAt.getHours() + 24);
 
-      const { error: insertError } = await supabase.from('stories').insert({
+      const storyData: any = {
         user_id: session.user.id,
-        image_url: publicUrl,
         expires_at: expiresAt.toISOString(),
-      });
+        image_url: publicUrl, // Store both images and videos in image_url column
+        metadata: { 
+          isVideo, 
+          duration: isVideo ? durationInSeconds : 10 // Videos use actual duration, images default to 10s
+        },
+      };
+
+      const { error: insertError } = await supabase.from('stories').insert(storyData);
 
       if (insertError) throw new Error(insertError.message);
 
@@ -807,14 +869,16 @@ export default function StoriesBar() {
               backgroundColor: '#000',
               zIndex: 1,
             }}>
-              {selectedStory.image_url ? (
+              {selectedStory.metadata?.isVideo || selectedStory.video_url ? (
+                <StoryVideoPlayer uri={selectedStory.video_url || selectedStory.image_url || ''} />
+              ) : selectedStory.image_url ? (
                 <Image
                   source={{ uri: selectedStory.image_url }}
                   style={{ width: SCREEN_WIDTH, height: SCREEN_HEIGHT * 0.8 }}
                   resizeMode="contain"
                 />
               ) : (
-                <Text style={{ color: '#fff', fontSize: 16 }}>No image URL</Text>
+                <Text style={{ color: '#fff', fontSize: 16 }}>No media available</Text>
               )}
             </View>
           )}

@@ -327,6 +327,7 @@ export default function ChatScreen() {
   const { sendHapticReaction } = useHapticReactions();
   
   const [isRecording, setIsRecording] = useState(false);
+  const [isSending, setIsSending] = useState(false);
   const [recordingStartX, setRecordingStartX] = useState(0);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [hasRecordingPermission, setHasRecordingPermission] = useState<boolean | null>(null);
@@ -337,6 +338,7 @@ export default function ChatScreen() {
   
   const flashListRef = useRef<FlashListRef<Message>>(null);
   const inputRef = useRef<TextInput>(null);
+  const lastSendTimeRef = useRef<number>(0);
   
   // CRITICAL: Use refs to prevent renderMessage recreation
   const messagesRef = useRef<Message[]>([]);
@@ -577,23 +579,10 @@ export default function ChatScreen() {
         setTimeout(() => scrollToBottom(false), 300);
       }
       
-      // Preload media in background for better performance
-      const mediaUrls: Array<{ url: string; type: 'image' | 'video' | 'voice' }> = [];
-      sorted.forEach((msg: any) => {
-        if (msg.type === 'image' && msg.metadata?.image_url) {
-          mediaUrls.push({ url: msg.metadata.image_url, type: 'image' });
-        } else if (msg.type === 'video' && msg.metadata?.video_url) {
-          mediaUrls.push({ url: msg.metadata.video_url, type: 'video' });
-        } else if ((msg.type === 'voice' || msg.metadata?.audio_url) && msg.metadata?.audio_url) {
-          mediaUrls.push({ url: msg.metadata.audio_url, type: 'voice' });
-        }
-      });
-      
-      // Preload up to last 20 media items (most recent)
-      if (mediaUrls.length > 0) {
-        const recentMedia = mediaUrls.slice(-20);
-        mediaCache.preloadMultiple(recentMedia);
-      }
+      // DISABLED: Background media preloading removed to prevent Supabase bandwidth overage
+      // Each ImageMessage/VideoMessage component now handles its own caching on demand
+      // This prevents downloading 20 images on every chat open, even if user never scrolls to them
+      // See: lib/mediaCache.ts and components/ImageMessage.tsx for local-first caching implementation
     }
   }, [supabaseMessages, user?.id, loading]);
 
@@ -650,12 +639,21 @@ export default function ChatScreen() {
   }, [messages.length, scrollToBottom]);
 
   const sendMessage = async () => {
-    if (!inputText.trim()) return;
+    const now = Date.now();
+    // Prevent sending if already sending or if sent within last 500ms
+    if (!inputText.trim() || isSending || (now - lastSendTimeRef.current) < 500) return;
     
+    lastSendTimeRef.current = now;
+    setIsSending(true);
     trigger('light');
-    await sendMessageToSupabase(inputText.trim(), 'text');
-    setInputText('');
-    clearDraft(id as string);
+    
+    try {
+      await sendMessageToSupabase(inputText.trim(), 'text');
+      setInputText('');
+      clearDraft(id as string);
+    } finally {
+      setIsSending(false);
+    }
   };
 
   // Upload voice message to Supabase
@@ -1190,19 +1188,23 @@ export default function ChatScreen() {
 
             {/* Send button - separate bubble outside input */}
             <TouchableOpacity
-              onPress={inputText.trim() ? sendMessage : undefined}
-              disabled={!inputText.trim()}
+              onPress={inputText.trim() && !isSending ? sendMessage : undefined}
+              disabled={!inputText.trim() || isSending}
               style={{
                 width: s(44),
                 height: s(44),
                 borderRadius: s(22),
-                backgroundColor: inputText.trim() ? theme.primary : theme.surfaceHighlight,
+                backgroundColor: inputText.trim() && !isSending ? theme.primary : theme.surfaceHighlight,
                 justifyContent: 'center',
                 alignItems: 'center',
-                opacity: inputText.trim() ? 1 : 0.5,
+                opacity: inputText.trim() && !isSending ? 1 : 0.5,
               }}
             >
-              <Send size={s(22)} color={inputText.trim() ? '#fff' : theme.textMuted} />
+              {isSending ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Send size={s(22)} color={inputText.trim() ? '#fff' : theme.textMuted} />
+              )}
             </TouchableOpacity>
           </View>
         </View>

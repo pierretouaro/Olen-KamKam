@@ -16,10 +16,10 @@ interface CacheIndex {
   [url: string]: CacheEntry;
 }
 
-// Max cache size: 500MB
-const MAX_CACHE_SIZE = 500 * 1024 * 1024;
-// Max age: 7 days
-const MAX_CACHE_AGE = 7 * 24 * 60 * 60 * 1000;
+// Max cache size: 50MB (reduced from 500MB to prevent storage bloat)
+const MAX_CACHE_SIZE = 50 * 1024 * 1024;
+// Max age: 1 day (reduced from 7 days)
+const MAX_CACHE_AGE = 24 * 60 * 60 * 1000;
 
 class MediaCache {
   private cacheIndex: CacheIndex = {};
@@ -93,12 +93,15 @@ class MediaCache {
   }
 
   private getCacheKey(url: string): string {
-    // Create a safe filename from URL
-    const hash = url.split('').reduce((acc, char) => {
+    // CRITICAL: Supabase Storage URLs contain ?token=xxx that changes constantly
+    // Strip query params to create stable cache key
+    const cleanUrl = url.split('?')[0];
+    
+    const hash = cleanUrl.split('').reduce((acc, char) => {
       return ((acc << 5) - acc) + char.charCodeAt(0) | 0;
     }, 0).toString(16);
     
-    const extension = url.split('.').pop()?.split('?')[0] || 'bin';
+    const extension = cleanUrl.split('.').pop() || 'bin';
     return `${hash}.${extension}`;
   }
 
@@ -207,22 +210,10 @@ class MediaCache {
   }
 
   async preloadMultiple(urls: Array<{ url: string; type: 'image' | 'video' | 'voice' }>): Promise<void> {
-    // Preload multiple files with concurrency limit
-    const CONCURRENT_LIMIT = 2; // Reduced to avoid overwhelming the system
-    const queue = [...urls];
-    
-    const processBatch = async () => {
-      while (queue.length > 0) {
-        const item = queue.shift();
-        if (item) {
-          await this.downloadAndCache(item.url, item.type).catch(() => {});
-        }
-      }
-    };
-    
-    // Start multiple workers
-    const workers = Array(CONCURRENT_LIMIT).fill(null).map(processBatch);
-    await Promise.all(workers);
+    // DISABLED: Preloading hammers Supabase with requests
+    // Each component now handles its own caching on demand
+    // This prevents downloading 20 images every time chat opens
+    return;
   }
 
   private async cleanup() {

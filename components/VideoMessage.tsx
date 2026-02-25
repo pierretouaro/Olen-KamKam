@@ -26,11 +26,10 @@ const formatTime = (seconds: number): string => {
 
 export default memo(function VideoMessage({ videoUrl, duration: initialDuration, thumbnailUrl, isMe, time }: VideoMessageProps) {
   const { theme, isDark, scale } = useTheme();
-  const [isLoading, setIsLoading] = useState(false);
+  const [localUri, setLocalUri] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
   const [hasStarted, setHasStarted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [cachedUri, setCachedUri] = useState<string>(videoUrl);
-  const [isCached, setIsCached] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [totalDuration, setTotalDuration] = useState(initialDuration || 0);
@@ -63,55 +62,56 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
     };
   }, []);
 
-  // Create video player for inline video (start with original URL)
-  const player = useVideoPlayer(videoUrl, (player) => {
+  // Load video from cache first - CRITICAL: Never use remote URL directly
+  useEffect(() => {
+    let mounted = true;
+    
+    const loadVideo = async () => {
+      try {
+        // Check local cache first
+        const cachedUri = await mediaCache.getCachedUri(videoUrl, 'video');
+        
+        if (cachedUri !== videoUrl) {
+          // Cache hit
+          if (mounted) {
+            setLocalUri(cachedUri);
+            setIsLoading(false);
+          }
+        } else {
+          // Cache miss: download once
+          const downloadedUri = await mediaCache.downloadAndCache(videoUrl, 'video');
+          if (mounted && downloadedUri !== videoUrl) {
+            setLocalUri(downloadedUri);
+          }
+          if (mounted) setIsLoading(false);
+        }
+      } catch (error) {
+        console.error('Video cache error:', error);
+        if (mounted) setIsLoading(false);
+      }
+    };
+    
+    loadVideo();
+    
+    return () => {
+      mounted = false;
+    };
+  }, [videoUrl]);
+
+  // Create video player ONLY when we have local URI (never use remote URL)
+  const player = useVideoPlayer(localUri || videoUrl, (player) => {
     player.loop = false;
     player.timeUpdateEventInterval = 0.25;
   });
 
   // Create video player for fullscreen
-  const fullscreenPlayer = useVideoPlayer(videoUrl, (player) => {
+  const fullscreenPlayer = useVideoPlayer(localUri || videoUrl, (player) => {
     player.loop = false;
     player.timeUpdateEventInterval = 0.25;
   });
 
-  // Check cache on mount and switch to cached URI when available
-  useEffect(() => {
-    const checkCache = async () => {
-      // First check if already cached
-      const existingCache = await mediaCache.getCachedUri(videoUrl, 'video');
-      if (existingCache !== videoUrl) {
-        setCachedUri(existingCache);
-        setIsCached(true);
-        // Replace player source with cached version for smoother playback
-        // Silently ignore errors - player might be released during unmount
-        player.replaceAsync(existingCache).catch(() => {});
-      }
-      
-      // Start background caching for future loads
-      mediaCache.downloadAndCache(videoUrl, 'video').then((localUri) => {
-        if (isMounted.current && localUri !== videoUrl && localUri !== cachedUri) {
-          setCachedUri(localUri);
-          setIsCached(true);
-        }
-      }).catch(() => {});
-    };
-    
-    checkCache();
-  }, [videoUrl, player, cachedUri]);
-
   // Progress animation
   const progressAnim = useSharedValue(0);
-
-  useEffect(() => {
-    isMounted.current = true;
-    return () => {
-      isMounted.current = false;
-      if (progressIntervalRef.current) {
-        clearInterval(progressIntervalRef.current);
-      }
-    };
-  }, []);
 
   useEffect(() => {
     if (totalDuration > 0) {
@@ -153,7 +153,7 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
   }, [player]);
 
   const handlePlayPause = useCallback(async () => {
-    if (isReleased.current) return;
+    if (isReleased.current || !localUri) return;
     
     try {
       if (isPlaying) {
@@ -169,11 +169,11 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
         isReleased.current = true;
       }
     }
-  }, [isPlaying, player]);
+  }, [isPlaying, player, localUri]);
 
   const handleDownload = useCallback(async () => {
+    if (!localUri) return;
     try {
-      const localUri = cachedUri !== videoUrl ? cachedUri : await mediaCache.downloadAndCache(videoUrl, 'video');
       const fileName = videoUrl.split('/').pop()?.split('?')[0] || `video_${Date.now()}.mp4`;
       const downloadUri = FileSystem.documentDirectory + fileName;
       await FileSystem.copyAsync({ from: localUri, to: downloadUri });
@@ -182,10 +182,10 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
       console.error('Download error:', error);
       Alert.alert('Download Failed', 'Could not download the video.');
     }
-  }, [videoUrl, cachedUri]);
+  }, [videoUrl, localUri]);
 
   const openFullscreen = useCallback(async () => {
-    if (isReleased.current) return;
+    if (isReleased.current || !localUri) return;
     
     setIsFullscreen(true);
     
@@ -201,7 +201,7 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
       setHasStarted(true);
       player.play();
     }
-  }, [hasStarted, player, fullscreenPlayer]);
+  }, [hasStarted, player, fullscreenPlayer, localUri]);
 
   const closeFullscreen = useCallback(async () => {
     if (isReleased.current) return;
@@ -236,6 +236,24 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
       subscription.remove();
     };
   }, [isFullscreen, fullscreenPlayer]);
+
+  // Loading state: Show placeholder while downloading
+  if (!localUri) {
+    return (
+      <View style={{
+        width: '75%',
+        height: s(180),
+        backgroundColor: isMe ? theme.primary : (isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)'),
+        borderRadius: s(18),
+        padding: s(4),
+        marginHorizontal: s(8),
+        justifyContent: 'center',
+        alignItems: 'center',
+      }}>
+        <ActivityIndicator color={theme.primary} />
+      </View>
+    );
+  }
 
   return (
     <View style={{
@@ -368,7 +386,7 @@ export default memo(function VideoMessage({ videoUrl, duration: initialDuration,
         </TouchableOpacity>
 
         {/* Cached indicator */}
-        {isCached && (
+        {localUri && localUri.startsWith('file://') && (
           <View style={{
             position: 'absolute',
             bottom: s(8),

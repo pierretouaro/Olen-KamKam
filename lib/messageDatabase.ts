@@ -274,9 +274,23 @@ class MessageDatabase {
 
     if (this.useSQLite && this.db) {
       try {
-        await this.db.runAsync(`
-          UPDATE messages SET id = ?, synced = 1 WHERE id = ?
-        `, [realId, tempId]);
+        // Check if real ID already exists (from realtime subscription)
+        const existing = await this.db.getFirstAsync(
+          `SELECT id FROM messages WHERE id = ?`,
+          [realId]
+        );
+        
+        if (existing) {
+          // Real message already exists, just delete the temp one
+          await this.db.runAsync(`
+            DELETE FROM messages WHERE id = ?
+          `, [tempId]);
+        } else {
+          // Update temp ID to real ID
+          await this.db.runAsync(`
+            UPDATE messages SET id = ?, synced = 1 WHERE id = ?
+          `, [realId, tempId]);
+        }
       } catch (error) {
         console.error('SQLite updateId error:', error);
       }

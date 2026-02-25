@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   View, 
   Text, 
@@ -24,14 +24,34 @@ import {
   Check,
   Image as ImageIcon,
   Camera,
-  Plus
+  Plus,
+  Video
 } from 'lucide-react-native';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Haptics from 'expo-haptics';
+import { VideoView, useVideoPlayer } from 'expo-video';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+
+// Video Preview Component
+function VideoPreview({ uri }: { uri: string }) {
+  const player = useVideoPlayer(uri, (player) => {
+    player.loop = true;
+    player.play();
+  });
+
+  return (
+    <View style={styles.previewVideoContainer}>
+      <VideoView
+        style={styles.previewVideo}
+        player={player}
+        contentFit="contain"
+      />
+    </View>
+  );
+}
 
 export default function CameraScreen() {
   const router = useRouter();
@@ -41,8 +61,14 @@ export default function CameraScreen() {
   const [facing, setFacing] = useState<CameraType>('back');
   const [flash, setFlash] = useState<'off' | 'on'>('off');
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
+  const [capturedVideo, setCapturedVideo] = useState<string | null>(null);
+  const [videoDuration, setVideoDuration] = useState<number>(0);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isStartingRecording, setIsStartingRecording] = useState(false);
   const [uploading, setUploading] = useState(false);
   const cameraRef = useRef<CameraView>(null);
+  const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isRecordingRef = useRef(false);
 
   useEffect(() => {
     if (!permission?.granted) {
@@ -51,6 +77,97 @@ export default function CameraScreen() {
   }, [permission]);
 
   const s = (size: number) => size;
+
+  // All hooks and callbacks must be defined BEFORE any early return
+  const startRecording = useCallback(async () => {
+    if (!cameraRef.current || isStartingRecording || isRecordingRef.current) return;
+
+    setIsStartingRecording(true);
+
+    try {
+      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+      
+      // Start timer first
+      let duration = 0;
+      isRecordingRef.current = true;
+      setIsRecording(true);
+      
+      recordingTimerRef.current = setInterval(() => {
+        duration += 1;
+        setVideoDuration(duration);
+        // Auto-stop at 60 seconds
+        if (duration >= 60) {
+          // Just stop the recording
+          if (recordingTimerRef.current) {
+            clearInterval(recordingTimerRef.current);
+            recordingTimerRef.current = null;
+          }
+          cameraRef.current?.stopRecording();
+        }
+      }, 1000);
+
+      // Small delay to ensure UI updates before starting recording
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Start recording - this promise resolves when stopRecording() is called
+      const video = await cameraRef.current.recordAsync({
+        maxDuration: 60,
+      });
+
+      // Recording stopped - clean up
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+      isRecordingRef.current = false;
+      setIsRecording(false);
+      setIsStartingRecording(false);
+
+      if (video) {
+        setCapturedVideo(video.uri);
+      }
+    } catch (error: any) {
+      // Don't show alert for "stopped before any data" error - it's expected on quick tap
+      if (!error?.message?.includes('stopped before any data')) {
+        Alert.alert('Error', 'Failed to record video');
+      }
+      console.error('Recording error:', error);
+      
+      // Clean up
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+      isRecordingRef.current = false;
+      setIsRecording(false);
+      setIsStartingRecording(false);
+    }
+  }, [isStartingRecording]);
+
+  const stopRecording = useCallback(() => {
+    if (!cameraRef.current || !isRecordingRef.current) return;
+    
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    
+    try {
+      cameraRef.current.stopRecording();
+    } catch (e) {
+      // Ignore errors from stopping recording
+    }
+    isRecordingRef.current = false;
+    setIsRecording(false);
+  }, []);
+
+  const handleRecordPress = useCallback(() => {
+    if (isRecordingRef.current) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  }, [startRecording, stopRecording]);
 
   if (!permission) {
     return (
@@ -138,14 +255,27 @@ export default function CameraScreen() {
 
   const openGallery = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ImagePicker.MediaTypeOptions.All,
       allowsEditing: true,
       aspect: [9, 16],
       quality: 0.9,
+      videoMaxDuration: 60,
     });
 
-    if (!result.canceled) {
-      setCapturedImage(result.assets[0].uri);
+    if (!result.canceled && result.assets[0]) {
+      const asset = result.assets[0];
+      if (asset.type === 'video' || (asset.duration && asset.duration > 0)) {
+        // Limit video duration to 60 seconds
+        const duration = asset.duration || 0;
+        if (duration > 60) {
+          Alert.alert('Video too long', 'Please select a video that is 60 seconds or less.');
+          return;
+        }
+        setCapturedVideo(asset.uri);
+        setVideoDuration(Math.round(duration));
+      } else {
+        setCapturedImage(asset.uri);
+      }
     }
   };
 
@@ -179,20 +309,23 @@ export default function CameraScreen() {
 
   const retakePicture = () => {
     setCapturedImage(null);
+    setCapturedVideo(null);
+    setVideoDuration(0);
   };
 
   const uploadStory = async () => {
-    if (!capturedImage || !session?.user) return;
+    if ((!capturedImage && !capturedVideo) || !session?.user) return;
 
     setUploading(true);
     try {
-      // Upload new image
-      const fileExt = 'jpg';
+      const isVideo = !!capturedVideo;
+      const fileUri = capturedVideo || capturedImage;
+      const fileExt = isVideo ? 'mp4' : 'jpg';
       const fileName = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}.${fileExt}`;
       const filePath = `${session.user.id}/${fileName}`;
 
       // Read file directly using expo-file-system (handles file:// URIs properly)
-      const base64 = await FileSystem.readAsStringAsync(capturedImage, {
+      const base64 = await FileSystem.readAsStringAsync(fileUri!, {
         encoding: 'base64',
       });
 
@@ -206,7 +339,7 @@ export default function CameraScreen() {
       const { error: uploadError } = await supabase.storage
         .from('stories')
         .upload(filePath, bytes, {
-          contentType: 'image/jpeg',
+          contentType: isVideo ? 'video/mp4' : 'image/jpeg',
           cacheControl: '3600',
         });
 
@@ -220,11 +353,20 @@ export default function CameraScreen() {
       const expiresAt = new Date();
       expiresAt.setHours(expiresAt.getHours() + 24);
 
-      const { error: insertError } = await supabase.from('stories').insert({
+      const storyData: any = {
         user_id: session.user.id,
-        image_url: publicUrl,
         expires_at: expiresAt.toISOString(),
-      });
+      };
+
+      if (isVideo) {
+        storyData.video_url = publicUrl;
+        storyData.duration = videoDuration;
+      } else {
+        storyData.image_url = publicUrl;
+        storyData.duration = 10; // Default 10s for images
+      }
+
+      const { error: insertError } = await supabase.from('stories').insert(storyData);
 
       if (insertError) throw new Error(insertError.message);
 
@@ -242,10 +384,16 @@ export default function CameraScreen() {
     router.back();
   };
 
-  if (capturedImage) {
+  if (capturedImage || capturedVideo) {
+    const isVideo = !!capturedVideo;
+    
     return (
       <View style={styles.previewContainer}>
-        <Image source={{ uri: capturedImage }} style={styles.previewImage} />
+        {isVideo ? (
+          <VideoPreview uri={capturedVideo} />
+        ) : (
+          <Image source={{ uri: capturedImage! }} style={styles.previewImage} />
+        )}
         
         <View style={styles.previewHeader}>
           <TouchableOpacity onPress={retakePicture} style={styles.previewButton}>
@@ -287,8 +435,24 @@ export default function CameraScreen() {
           textShadowOffset: { width: 0, height: 1 },
           textShadowRadius: 3,
         }}>
-          Add to Story
+          {isVideo ? 'Video Story' : 'Add to Story'}
         </Text>
+        
+        {isVideo && (
+          <Text style={{
+            position: 'absolute',
+            bottom: 150,
+            alignSelf: 'center',
+            color: '#fff',
+            fontSize: 14,
+            fontWeight: '500',
+            textShadowColor: 'rgba(0,0,0,0.5)',
+            textShadowOffset: { width: 0, height: 1 },
+            textShadowRadius: 3,
+          }}>
+            {Math.round(videoDuration)}s
+          </Text>
+        )}
       </View>
     );
   }
@@ -331,12 +495,32 @@ export default function CameraScreen() {
             <ImageIcon size={24} color="#fff" />
           </TouchableOpacity>
 
+          {/* Photo Button */}
           <TouchableOpacity 
             style={[styles.captureButton, { backgroundColor: theme.primary }]}
             onPress={takePicture}
             activeOpacity={0.8}
           >
             <View style={styles.captureInner} />
+          </TouchableOpacity>
+
+          {/* Video Record Button */}
+          <TouchableOpacity 
+            style={[styles.videoButton, { 
+              backgroundColor: isRecording ? '#EF4444' : isStartingRecording ? 'rgba(239, 68, 68, 0.5)' : 'rgba(0,0,0,0.5)',
+              opacity: isStartingRecording ? 0.7 : 1,
+            }]}
+            onPress={handleRecordPress}
+            activeOpacity={0.8}
+            disabled={isStartingRecording}
+          >
+            {isRecording ? (
+              <View style={{ width: 20, height: 20, backgroundColor: '#fff', borderRadius: 4 }} />
+            ) : isStartingRecording ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Video size={24} color="#fff" />
+            )}
           </TouchableOpacity>
 
           <TouchableOpacity 
@@ -346,6 +530,27 @@ export default function CameraScreen() {
             <RotateCcw size={28} color="#fff" />
           </TouchableOpacity>
         </View>
+        
+        {/* Recording Timer */}
+        {isRecording && (
+          <View style={{
+            position: 'absolute',
+            bottom: 130,
+            alignSelf: 'center',
+            backgroundColor: 'rgba(239, 68, 68, 0.8)',
+            paddingHorizontal: 16,
+            paddingVertical: 6,
+            borderRadius: 16,
+          }}>
+            <Text style={{
+              color: '#fff',
+              fontSize: 16,
+              fontWeight: '700',
+            }}>
+              {videoDuration}s / 60s
+            </Text>
+          </View>
+        )}
       </CameraView>
     </View>
   );
@@ -439,6 +644,15 @@ const styles = StyleSheet.create({
     borderRadius: 36,
     backgroundColor: '#fff',
   },
+  videoButton: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 3,
+    borderColor: '#fff',
+  },
   flipButton: {
     width: 50,
     height: 50,
@@ -454,6 +668,13 @@ const styles = StyleSheet.create({
   previewImage: {
     flex: 1,
     resizeMode: 'contain',
+  },
+  previewVideoContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  previewVideo: {
+    flex: 1,
   },
   previewHeader: {
     position: 'absolute',

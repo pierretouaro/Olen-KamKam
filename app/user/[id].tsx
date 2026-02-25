@@ -1,10 +1,11 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { View, Text, TouchableOpacity, ScrollView, ActivityIndicator, Image, Modal, Dimensions } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../context/ThemeContext';
 import { supabase } from '../../lib/supabase';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import { 
   ChevronLeft, 
   User,
@@ -31,7 +32,9 @@ interface UserProfile {
 
 interface UserStory {
   id: string;
-  image_url: string;
+  image_url?: string;
+  video_url?: string;
+  duration?: number;
   created_at: string;
   expires_at: string;
 }
@@ -46,6 +49,156 @@ export default function UserProfileScreen() {
   const [story, setStory] = useState<UserStory | null>(null);
   const [loading, setLoading] = useState(true);
   const [viewingStory, setViewingStory] = useState(false);
+
+  // Story viewer component
+  const StoryViewer = useCallback(({ story, onClose }: { story: UserStory; onClose: () => void }) => {
+    const isVideo = !!story.video_url;
+    const duration = story.duration || (isVideo ? 0 : 10); // Default 10s for images
+    const [progress, setProgress] = useState(0);
+    const progressAnim = useRef<ReturnType<typeof setInterval> | null>(null);
+
+    // For video stories, use actual video duration
+    // CRITICAL FIX: Hook must be called unconditionally at top level
+    const player = useVideoPlayer(story.video_url || '', (player) => {
+      player.loop = false;
+      if (isVideo) player.play();
+    });
+
+    useEffect(() => {
+      if (!isVideo) {
+        // Image story: manual timer
+        const interval = 100; // Update every 100ms
+        const totalIntervals = (duration * 1000) / interval;
+        let currentInterval = 0;
+
+        progressAnim.current = setInterval(() => {
+          currentInterval++;
+          const newProgress = (currentInterval / totalIntervals) * 100;
+          setProgress(newProgress);
+
+          if (currentInterval >= totalIntervals) {
+            if (progressAnim.current) clearInterval(progressAnim.current);
+            onClose();
+          }
+        }, interval);
+
+        return () => {
+          if (progressAnim.current) clearInterval(progressAnim.current);
+        };
+      } else if (isVideo && player) {
+        // Video story: sync with video playback
+        const checkProgress = setInterval(() => {
+          if (player.duration > 0) {
+            const currentProgress = (player.currentTime / player.duration) * 100;
+            setProgress(currentProgress);
+            
+            if (player.currentTime >= player.duration) {
+              clearInterval(checkProgress);
+              onClose();
+            }
+          }
+        }, 100);
+
+        return () => clearInterval(checkProgress);
+      }
+    }, [isVideo, duration, player]);
+
+    return (
+      <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' }}>
+        {/* Progress Bar */}
+        <View style={{
+          position: 'absolute',
+          top: 60,
+          left: 20,
+          right: 20,
+          height: 3,
+          backgroundColor: 'rgba(255,255,255,0.3)',
+          borderRadius: 2,
+          zIndex: 10,
+        }}>
+          <View style={{
+            width: `${progress}%`,
+            height: '100%',
+            backgroundColor: '#fff',
+            borderRadius: 2,
+          }} />
+        </View>
+
+        {/* Content */}
+        {isVideo ? (
+          <VideoView
+            style={{ width: Dimensions.get('window').width, height: Dimensions.get('window').height }}
+            player={player}
+            contentFit="contain"
+          />
+        ) : (
+          <Image
+            source={{ uri: story.image_url }}
+            style={{ width: Dimensions.get('window').width, height: Dimensions.get('window').height }}
+            resizeMode="contain"
+          />
+        )}
+
+        {/* Close Button */}
+        <TouchableOpacity 
+          onPress={onClose}
+          style={{
+            position: 'absolute',
+            top: 80,
+            right: 20,
+            width: 44,
+            height: 44,
+            borderRadius: 22,
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            justifyContent: 'center',
+            alignItems: 'center',
+            zIndex: 10,
+          }}
+        >
+          <X size={28} color="#fff" />
+        </TouchableOpacity>
+
+        {/* Expiry Info */}
+        <View style={{
+          position: 'absolute',
+          bottom: 100,
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 8,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          paddingHorizontal: 16,
+          paddingVertical: 8,
+          borderRadius: 20,
+        }}>
+          <Clock3 size={14} color="#fff" />
+          <Text style={{ color: '#fff', fontSize: 14, fontWeight: '600' }}>
+            {new Date(story.expires_at).getTime() - Date.now() > 0 
+              ? `${Math.ceil((new Date(story.expires_at).getTime() - Date.now()) / (1000 * 60 * 60))}h left`
+              : 'Expired'
+            }
+          </Text>
+        </View>
+
+        {/* Duration Badge for Videos */}
+        {isVideo && (
+          <View style={{
+            position: 'absolute',
+            top: 80,
+            left: 20,
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            paddingHorizontal: 12,
+            paddingVertical: 6,
+            borderRadius: 12,
+            zIndex: 10,
+          }}>
+            <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>
+              {Math.round(duration)}s
+            </Text>
+          </View>
+        )}
+      </View>
+    );
+  }, []);
 
   const s = (size: number) => size * scale;
 
@@ -158,6 +311,80 @@ export default function UserProfileScreen() {
       {children}
     </View>
   );
+
+  // Story thumbnail component
+  const StoryThumbnail = ({ story }: { story: UserStory }) => {
+    const isVideo = !!story.video_url;
+    
+    return (
+      <TouchableOpacity 
+        onPress={() => setViewingStory(true)}
+        style={{
+          marginBottom: s(24),
+          borderRadius: s(16),
+          overflow: 'hidden',
+          borderWidth: 3,
+          borderColor: theme.primary,
+        }}
+      >
+        <Image
+          source={{ uri: isVideo ? story.video_url : story.image_url }}
+          style={{
+            width: s(200),
+            height: s(280),
+            borderRadius: s(13),
+          }}
+          resizeMode="cover"
+        />
+        
+        {/* Video indicator */}
+        {isVideo && (
+          <View style={{
+            position: 'absolute',
+            top: s(12),
+            right: s(12),
+            backgroundColor: 'rgba(0,0,0,0.6)',
+            paddingHorizontal: s(8),
+            paddingVertical: s(4),
+            borderRadius: s(8),
+          }}>
+            <Text style={{
+              color: '#fff',
+              fontSize: s(11),
+              fontWeight: '600',
+            }}>
+              {Math.round(story.duration || 0)}s
+            </Text>
+          </View>
+        )}
+        
+        <View style={{
+          position: 'absolute',
+          bottom: s(12),
+          left: s(12),
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: s(4),
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          paddingHorizontal: s(8),
+          paddingVertical: s(4),
+          borderRadius: s(12),
+        }}>
+          <Clock3 size={s(11)} color="#fff" />
+          <Text style={{
+            color: '#fff',
+            fontSize: s(11),
+            fontWeight: '600',
+          }}>
+            {new Date(story.expires_at).getTime() - Date.now() > 0 
+              ? `${Math.ceil((new Date(story.expires_at).getTime() - Date.now()) / (1000 * 60 * 60))}h left`
+              : 'Expired'
+            }
+          </Text>
+        </View>
+      </TouchableOpacity>
+    );
+  };
 
   if (loading) {
     return (
@@ -300,52 +527,7 @@ export default function UserProfileScreen() {
           </Text>
 
           {/* Story Preview */}
-          {story && (
-            <TouchableOpacity 
-              onPress={() => setViewingStory(true)}
-              style={{
-                marginBottom: s(24),
-                borderRadius: s(16),
-                overflow: 'hidden',
-                borderWidth: 3,
-                borderColor: theme.primary,
-              }}
-            >
-              <Image
-                source={{ uri: story.image_url }}
-                style={{
-                  width: s(200),
-                  height: s(280),
-                  borderRadius: s(13),
-                }}
-                resizeMode="cover"
-              />
-              <View style={{
-                position: 'absolute',
-                bottom: s(12),
-                left: s(12),
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: s(4),
-                backgroundColor: 'rgba(0,0,0,0.5)',
-                paddingHorizontal: s(8),
-                paddingVertical: s(4),
-                borderRadius: s(12),
-              }}>
-                <Clock3 size={s(11)} color="#fff" />
-                <Text style={{
-                  color: '#fff',
-                  fontSize: s(11),
-                  fontWeight: '600',
-                }}>
-                  {new Date(story.expires_at).getTime() - Date.now() > 0 
-                    ? `${Math.ceil((new Date(story.expires_at).getTime() - Date.now()) / (1000 * 60 * 60))}h left`
-                    : 'Expired'
-                  }
-                </Text>
-              </View>
-            </TouchableOpacity>
-          )}
+          {story && <StoryThumbnail story={story} />}
 
           {/* Action Buttons */}
           <View style={{ flexDirection: 'row', gap: s(16) }}>
@@ -432,52 +614,12 @@ export default function UserProfileScreen() {
         animationType="fade"
         onRequestClose={() => setViewingStory(false)}
       >
-        <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' }}>
-          {story && (
-            <>
-              <Image
-                source={{ uri: story.image_url }}
-                style={{ width: Dimensions.get('window').width, height: Dimensions.get('window').height }}
-                resizeMode="contain"
-              />
-              <TouchableOpacity 
-                onPress={() => setViewingStory(false)}
-                style={{
-                  position: 'absolute',
-                  top: 50,
-                  right: 20,
-                  width: 44,
-                  height: 44,
-                  borderRadius: 22,
-                  backgroundColor: 'rgba(0,0,0,0.5)',
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                }}
-              >
-                <X size={28} color="#fff" />
-              </TouchableOpacity>
-              <View style={{
-                position: 'absolute',
-                bottom: 100,
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: 8,
-                backgroundColor: 'rgba(0,0,0,0.5)',
-                paddingHorizontal: 16,
-                paddingVertical: 8,
-                borderRadius: 20,
-              }}>
-                <Clock3 size={14} color="#fff" />
-                <Text style={{ color: '#fff', fontSize: 14, fontWeight: '600' }}>
-                  {new Date(story.expires_at).getTime() - Date.now() > 0 
-                    ? `${Math.ceil((new Date(story.expires_at).getTime() - Date.now()) / (1000 * 60 * 60))}h left`
-                    : 'Expired'
-                  }
-                </Text>
-              </View>
-            </>
-          )}
-        </View>
+        {story && (
+          <StoryViewer 
+            story={story} 
+            onClose={() => setViewingStory(false)} 
+          />
+        )}
       </Modal>
     </View>
   );

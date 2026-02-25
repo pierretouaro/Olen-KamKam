@@ -280,7 +280,7 @@ export default function NewChatScreen() {
             fontSize: s(14),
             fontWeight: contact.isAppUser ? '600' : '400',
           }}>
-            {contact.isAppUser ? 'On Olen' : contact.displayNumber}
+            {contact.isAppUser ? 'On Olen' : contact.phoneNumber}
           </Text>
         </View>
 

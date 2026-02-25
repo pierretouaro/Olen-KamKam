@@ -1,4 +1,4 @@
-import { useState, useCallback, memo, useEffect } from 'react';
+import { useState, useEffect, useCallback, memo } from 'react';
 import { View, Text, TouchableOpacity, Modal, Dimensions, ActivityIndicator } from 'react-native';
 import { Image } from 'expo-image';
 import { X, Download } from 'lucide-react-native';
@@ -16,69 +16,100 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 export default memo(function ImageMessage({ imageUrl, isMe, time }: ImageMessageProps) {
   const { theme, isDark, scale } = useTheme();
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const [localUri, setLocalUri] = useState<string | null>(null);
   const [hasError, setHasError] = useState(false);
-  const [displayUri, setDisplayUri] = useState<string>(imageUrl);
-
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  
   const s = (size: number) => size * scale;
 
-  // Check cache on mount and use cached URI if available
   useEffect(() => {
-    const loadCachedImage = async () => {
-      const cachedUri = await mediaCache.getCachedUri(imageUrl, 'image');
-      if (cachedUri !== imageUrl) {
-        setDisplayUri(cachedUri);
-      }
-      // Also trigger background caching
-      mediaCache.downloadAndCache(imageUrl, 'image').then((localUri) => {
-        if (localUri !== imageUrl) {
-          setDisplayUri(localUri);
+    let isMounted = true;
+    
+    const loadImage = async () => {
+      try {
+        // 1. Check local cache first (fast, synchronous check)
+        const cachedUri = await mediaCache.getCachedUri(imageUrl, 'image');
+        
+        if (cachedUri !== imageUrl) {
+          // Cache hit: use local file immediately
+          if (isMounted) {
+            setLocalUri(cachedUri);
+          }
+        } else {
+          // Cache miss: download once, then use local
+          const downloadedUri = await mediaCache.downloadAndCache(imageUrl, 'image');
+          if (isMounted && downloadedUri !== imageUrl) {
+            setLocalUri(downloadedUri);
+          } else if (isMounted) {
+            // Download failed, show error
+            setHasError(true);
+          }
         }
-      }).catch(() => {});
+      } catch (error) {
+        console.error('Image load error:', error);
+        if (isMounted) setHasError(true);
+      }
     };
     
-    loadCachedImage();
-  }, [imageUrl]);
+    loadImage();
+    
+    return () => {
+      isMounted = false;
+    };
+  }, [imageUrl]); // Re-run if URL changes (FlashList recycling)
 
   const handleDownload = useCallback(async () => {
+    if (!localUri) return;
     try {
-      const localUri = await mediaCache.downloadAndCache(imageUrl, 'image');
       const fileName = imageUrl.split('/').pop()?.split('?')[0] || `image_${Date.now()}.jpg`;
       const downloadUri = FileSystem.documentDirectory + fileName;
       await FileSystem.copyAsync({ from: localUri, to: downloadUri });
     } catch (error) {
       console.error('Download error:', error);
     }
-  }, [imageUrl]);
+  }, [localUri, imageUrl]);
 
-  if (hasError) {
+  // RENDER STATE 1: Loading (no network request triggered)
+  if (!localUri && !hasError) {
     return (
       <View style={{
-        maxWidth: '65%',
-        backgroundColor: isMe ? theme.primary : (isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)'),
+        width: s(200),
+        height: s(200),
+        backgroundColor: theme.surfaceHighlight,
         borderRadius: s(18),
-        padding: s(12),
+        justifyContent: 'center',
+        alignItems: 'center',
         marginHorizontal: s(8),
       }}>
-        <Text style={{ color: isMe ? '#fff' : theme.text }}>Image failed to load</Text>
-        <Text style={{ color: isMe ? 'rgba(255,255,255,0.6)' : theme.textMuted, fontSize: s(10), marginTop: s(4) }}>
-          {time}
-        </Text>
+        <ActivityIndicator color={theme.primary} />
       </View>
     );
   }
 
+  // RENDER STATE 2: Error
+  if (hasError) {
+    return (
+      <View style={{
+        width: s(200),
+        height: s(200),
+        backgroundColor: isMe ? theme.primary : (isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)'),
+        borderRadius: s(18),
+        justifyContent: 'center',
+        alignItems: 'center',
+        marginHorizontal: s(8),
+      }}>
+        <Text style={{ color: isMe ? '#fff' : theme.text }}>Failed to load</Text>
+      </View>
+    );
+  }
+
+  // RENDER STATE 3: Success (ALWAYS use local file:// URI)
   return (
     <>
-      {/* Thumbnail */}
       <TouchableOpacity 
         onPress={() => setIsFullscreen(true)}
         activeOpacity={0.9}
-        style={{
-          maxWidth: '65%',
-          marginHorizontal: s(8),
-        }}
+        style={{ maxWidth: '65%', marginHorizontal: s(8) }}
       >
         <View style={{
           backgroundColor: isMe ? theme.primary : (isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)'),
@@ -87,7 +118,7 @@ export default memo(function ImageMessage({ imageUrl, isMe, time }: ImageMessage
           overflow: 'hidden',
         }}>
           <Image
-            source={{ uri: displayUri }}
+            source={{ uri: localUri! }} // CRITICAL: Never imageUrl (remote)
             style={{
               width: s(200),
               height: s(200),
@@ -95,33 +126,10 @@ export default memo(function ImageMessage({ imageUrl, isMe, time }: ImageMessage
               backgroundColor: theme.surfaceHighlight,
             }}
             contentFit="cover"
-            transition={100}
-            cachePolicy="memory-disk"
-            priority="low"
-            onLoadStart={() => setIsLoading(true)}
-            onLoadEnd={() => setIsLoading(false)}
-            onError={() => {
-              setIsLoading(false);
-              setHasError(true);
-            }}
+            cachePolicy="memory" // Already on disk, just use memory cache
+            transition={200}
           />
           
-          {isLoading && (
-            <View style={{
-              position: 'absolute',
-              top: s(4),
-              left: s(4),
-              right: s(4),
-              bottom: s(4),
-              justifyContent: 'center',
-              alignItems: 'center',
-              backgroundColor: theme.surfaceHighlight,
-              borderRadius: s(14),
-            }}>
-              <ActivityIndicator color={theme.primary} />
-            </View>
-          )}
-
           {/* Time overlay */}
           <View style={{
             position: 'absolute',
@@ -132,11 +140,7 @@ export default memo(function ImageMessage({ imageUrl, isMe, time }: ImageMessage
             paddingVertical: s(4),
             borderRadius: s(10),
           }}>
-            <Text style={{
-              color: '#fff',
-              fontSize: s(10),
-              fontWeight: '500',
-            }}>
+            <Text style={{ color: '#fff', fontSize: s(10), fontWeight: '500' }}>
               {time}
             </Text>
           </View>
@@ -196,14 +200,13 @@ export default memo(function ImageMessage({ imageUrl, isMe, time }: ImageMessage
 
           {/* Fullscreen Image */}
           <Image
-            source={{ uri: displayUri }}
+            source={{ uri: localUri! }} // CRITICAL: Always use local URI
             style={{
               width: SCREEN_WIDTH,
               height: SCREEN_HEIGHT * 0.7,
             }}
             contentFit="contain"
-            cachePolicy="memory-disk"
-            priority="low"
+            cachePolicy="memory"
             transition={200}
           />
 
