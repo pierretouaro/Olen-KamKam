@@ -41,3 +41,8 @@ app-example
 # generated native folders
 /ios
 /android
+
+# secrets and database dumps
+.env
+supabase-backup/data.sql
+supabase-backup/globals.sql
